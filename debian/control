@@ -1,0 +1,23 @@
+Source: cog
+Section: web
+Priority: optional
+Maintainer: Alberto Garcia <berto@igalia.com>
+Build-Depends: debhelper (>= 11),
+               cmake,
+               libwayland-dev,
+               libwpebackend-fdo-1.0-dev,
+               libwpewebkit-1.0-dev,
+               wayland-protocols
+Standards-Version: 4.5.0
+Rules-Requires-Root: no
+Homepage: https://github.com/Igalia/cog
+Vcs-Browser: https://salsa.debian.org/berto/cog
+Vcs-Git: https://salsa.debian.org/berto/cog.git
+
+Package: cog
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Single-window web browser based on WPE WebKit
+ Cog is a small, single-window web browser based on WPE WebKit.
+ It provides no user interface and is suitable to be used as a web
+ application container for embedded devices in kiosk mode.

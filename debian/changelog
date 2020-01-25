@@ -1,0 +1,5 @@
+cog (0.4.0-1) experimental; urgency=medium
+
+  * Initial release (Closes: #949476)
+
+ -- Alberto Garcia <berto@igalia.com>  Sat, 25 Jan 2020 20:01:07 +0100

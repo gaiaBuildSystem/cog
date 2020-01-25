@@ -1,0 +1,22 @@
+From: Alberto Garcia <berto@igalia.com>
+Subject: Default to the fdo backend if none is specified
+diff --git a/cog.c b/cog.c
+index 693815b..a2c9998 100644
+--- a/cog.c
++++ b/cog.c
+@@ -299,11 +299,12 @@ platform_setup (CogShell *shell)
+      * a given platform.
+      */
+ 
++    if (!s_options.platform_name) {
++        s_options.platform_name = g_strdup("fdo");
++    }
++
+     g_debug ("%s: Platform name: %s", __func__, s_options.platform_name);
+ 
+-    if (!s_options.platform_name)
+-        return FALSE;
+-
+     g_autofree char *platform_soname =
+         g_strdup_printf ("libcogplatform-%s.so", s_options.platform_name);
+     g_clear_pointer (&s_options.platform_name, g_free);
