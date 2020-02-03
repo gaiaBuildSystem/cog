@@ -2,7 +2,7 @@ Source: cog
 Section: web
 Priority: optional
 Maintainer: Alberto Garcia <berto@igalia.com>
-Build-Depends: debhelper (>= 11),
+Build-Depends: debhelper-compat (= 12),
                cmake,
                libwayland-dev,
                libwpebackend-fdo-1.0-dev,
