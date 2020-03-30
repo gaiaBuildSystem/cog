@@ -19,16 +19,17 @@ G_DEFINE_QUARK (COG_PLATFORM_WPE_ERROR, cog_platform_wpe_error)
 struct _CogPlatform {
     void *so;
 
-    gboolean              (*setup)            (CogPlatform *platform,
-                                               CogShell    *shell,
-                                               const char  *params,
-                                               GError     **error);
+    gboolean                  (*setup)             (CogPlatform *platform,
+                                                    CogShell    *shell,
+                                                    const char  *params,
+                                                    GError     **error);
 
-    void                  (*teardown)         (CogPlatform *platform);
+    void                      (*teardown)          (CogPlatform *platform);
 
-    WebKitWebViewBackend* (*get_view_backend) (CogPlatform   *platform,
-                                               WebKitWebView *related_view,
-                                               GError       **error);
+    WebKitWebViewBackend*     (*get_view_backend)  (CogPlatform   *platform,
+                                                    WebKitWebView *related_view,
+                                                    GError       **error);
+    WebKitInputMethodContext* (*create_im_context) (CogPlatform   *platform);
 };
 
 CogPlatform*
@@ -64,18 +65,21 @@ cog_platform_try_load (CogPlatform *platform,
     if (!platform->so)
         return FALSE;
 
-    platform->setup = dlsym (platform->so, "cog_platform_setup");
+    platform->setup = dlsym (platform->so, "cog_platform_plugin_setup");
     if (!platform->setup)
         goto err_out;
 
-    platform->teardown = dlsym (platform->so, "cog_platform_teardown");
+    platform->teardown = dlsym (platform->so, "cog_platform_plugin_teardown");
     if (!platform->teardown)
         goto err_out;
 
     platform->get_view_backend = dlsym (platform->so,
-                                        "cog_platform_get_view_backend");
+                                        "cog_platform_plugin_get_view_backend");
     if (!platform->get_view_backend)
         goto err_out;
+
+    platform->create_im_context = dlsym (platform->so,
+                                         "cog_platform_plugin_create_im_context");
 
     return TRUE;
 
@@ -104,4 +108,17 @@ cog_platform_get_view_backend (CogPlatform   *platform,
     g_return_val_if_fail (platform != NULL, NULL);
 
     return platform->get_view_backend (platform, related_view, error);
+}
+
+WebKitInputMethodContext*
+cog_platform_create_im_context (CogPlatform *platform)
+{
+#if COG_IM_API_SUPPORTED
+    g_return_val_if_fail (platform != NULL, NULL);
+
+    if (platform->create_im_context)
+        return platform->create_im_context (platform);
+#endif
+
+    return NULL;
 }

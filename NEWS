@@ -1,25 +1,23 @@
-==========================
-0.4.0 - September 20, 2019
-==========================
+======================
+0.6.0 - March 30, 2020
+======================
 
-- Avoid a deprecation warning when building with GLib 2.62.
-
-===========================
-0.3.91 - September 16, 2019
-===========================
-
-- HiDPI support. The "cog --device-scale" option can be used to set the
-  initial scale factor.
-- Using "cog --version" now also prints the WebKit version and (if available
-  at build time), Git repository information.
-- The libcogcore library now has proper libtool versioning.
-- fdo: Fix axis scrolling.
-- New "experimental-drm" platform plug-in which uses KMS+DRM (Kernel Mode
-  Setting, Direct Rendering Manager) for direct display on framebuffers,
-  and libinput for input event processing.
+- fdo: Use wayland-cursor if available to set a default pointer cursor.
+- fdo: Fix crashes due to unchecked usage of libxkbcommon structures.
+- fdo: Fix wrong offsets in input deletions done by input methods.
 
 =====================
-0.3.1 - June 28, 2019
+0.5.1 - March 2, 2020
+=====================
+
+- fdo: Added support for Input Methods.
+- fdo: Added support for smooth scrolling using 2D axis events.
+- fdo: Added support for direct-display video rendering.
+- drm: The DRM platform module is no longer experimental.
+- New manual pages for cog and cogctl.
+
+=====================
+0.3.1 - June 28, 2018
 =====================
 
 - Fix installed cogcore.pc file to use the correct wpe-webkit-1.0 module as
