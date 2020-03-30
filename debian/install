@@ -1,3 +1,4 @@
 usr/bin/*
 usr/lib/*/*.so.*
 usr/lib/*/libcogplatform-fdo.so
+usr/share/man
