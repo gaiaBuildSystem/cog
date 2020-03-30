@@ -1,0 +1,3 @@
+usr/include/
+usr/lib/*/libcogcore.so
+usr/lib/*/pkgconfig/cogcore.pc

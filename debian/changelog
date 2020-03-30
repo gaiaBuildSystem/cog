@@ -5,6 +5,8 @@ cog (0.6.0-1) UNRELEASED; urgency=medium
     - Update copyright years.
   * Upstream provides the manpages now, add them to debian/install and
     remove the ones shipped in the debian directory.
+  * Add uninstalled development files to debian/not-installed so
+    dh_misssing does not complain about them.
 
  -- Alberto Garcia <berto@igalia.com>  Mon, 30 Mar 2020 13:37:02 +0200
 
