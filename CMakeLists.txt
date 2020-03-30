@@ -4,7 +4,7 @@ list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
 include(GNUInstallDirs)
 
-set_project_version(0 4 0)
+set_project_version(0 6 0)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -13,7 +13,7 @@ set_project_version(0 4 0)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 1 1 0)
+calculate_library_versions_from_libtool_triple(COGCORE 3 1 2)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
 include(DistTargets)
@@ -58,6 +58,9 @@ option(COG_USE_WEBKITGTK "Use WebKitGTK+ instead of WPEWebKit" OFF)
 option(COG_PLATFORM_FDO "Build the FDO platform module" ON)
 option(COG_PLATFORM_DRM "Build the DRM platform module" OFF)
 option(COG_BUILD_PROGRAMS "Build and install programs as well" ON)
+option(INSTALL_MAN_PAGES "Install the man(1) pages if COG_BUILD_PROGRAMS is enabled" ON)
+option(COG_WESTON_DIRECT_DISPLAY "Build direct display support for the FDO platform module" OFF)
+
 set(COG_APPID "" CACHE STRING "Default GApplication unique identifier")
 set(COG_HOME_URI "" CACHE STRING "Default home URI")
 
@@ -107,7 +110,7 @@ set(COGCORE_SOURCES
     core/cog-webkit-utils.c
 )
 
-pkg_check_modules(GIO REQUIRED gio-2.0)
+pkg_check_modules(GIO REQUIRED gio-2.0>=2.44)
 pkg_check_modules(SOUP REQUIRED libsoup-2.4)
 if (COG_USE_WEBKITGTK)
     list(APPEND COGCORE_SOURCES core/cog-gtk-utils.c)
@@ -126,6 +129,11 @@ else ()
         add_definitions(-DCOG_BG_COLOR_API_SUPPORTED=1)
     else ()
         add_definitions(-DCOG_BG_COLOR_API_SUPPORTED=0)
+    endif ()
+    if ("${WEB_ENGINE_VERSION}" VERSION_GREATER "2.27.3")
+        set(COG_IM_API_SUPPORTED ON)
+    else ()
+        set(COG_IM_API_SUPPORTED OFF)
     endif ()
 endif ()
 
@@ -187,6 +195,12 @@ if (COG_BUILD_PROGRAMS)
         DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT "runtime"
     )
+    if (INSTALL_MAN_PAGES)
+        install(FILES data/cog.1 data/cogctl.1
+            DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+            COMPONENT "runtime"
+        )
+    endif ()
 endif ()
 
 
@@ -208,54 +222,82 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cogcore.pc
 # libcogplaform-fdo
 
 if (COG_PLATFORM_FDO AND NOT COG_USE_WEBKITGTK)
-    set(WAYLAND_1_10_OR_GREATER OFF)
-    pkg_check_modules(WAYLAND REQUIRED wayland-client)
-    if (NOT (WAYLAND_VERSION VERSION_LESS 1.10))
-        set(WAYLAND_1_10_OR_GREATER ON)
-    endif ()
-
-    pkg_check_modules(COGPLATFORM_FDO_DEPS REQUIRED wpe-webkit-1.0>=2.24.0 wpebackend-fdo-1.0>=1.3.1 egl xkbcommon)
-    pkg_check_modules(WAYLAND_EGL wayland-egl)
-
-    set(COGPLATFORM_FDO_INCLUDE_DIRS
-        ${COGPLATFORM_FDO_DEPS_INCLUDE_DIRS}
-        ${WAYLAND_INCLUDE_DIRS}
-        ${WAYLAND_EGL_INCLUDE_DIRS}
-    )
-    set(COGPLATFORM_FDO_CFLAGS
-        ${COGPLATFORM_FDO_DEPS_CFLAGS_OTHER}
-        ${WAYLAND_CFLAGS_OTHER}
-        ${WAYLAND_EGL_CFLAGS_OTHER}
-    )
-    set(COGPLATFORM_FDO_LDFLAGS
-        ${COGPLATFORM_FDO_DEPS_LDFLAGS}
-        ${WAYLAND_LDFLAGS}
-        ${WAYLAND_EGL_LDFLAGS}
-    )
-
     add_library(cogplatform-fdo MODULE platform/cog-platform-fdo.c)
+
     set_property(TARGET cogplatform-fdo PROPERTY C_STANDARD 99)
-    target_include_directories(cogplatform-fdo PUBLIC wayland ${COGPLATFORM_FDO_INCLUDE_DIRS})
-    target_link_libraries(cogplatform-fdo cogcore ${COGPLATFORM_FDO_LDFLAGS})
-    target_compile_options(cogplatform-fdo
-        PUBLIC ${COGPLATFORM_FDO_CFLAGS}
-        PRIVATE -DG_LOG_DOMAIN=\"Cog-FDO\"
-    )
+
+    target_compile_definitions(cogplatform-fdo PRIVATE G_LOG_DOMAIN=\"Cog-FDO\")
 
     find_package(WaylandProtocols REQUIRED)
     add_wayland_protocol(cogplatform-fdo CLIENT xdg-shell)
     add_wayland_protocol(cogplatform-fdo CLIENT fullscreen-shell-unstable-v1)
+    add_wayland_protocol(cogplatform-fdo CLIENT presentation-time)
+    add_wayland_protocol(cogplatform-fdo CLIENT linux-dmabuf-unstable-v1)
+
+    set(WAYLAND_1_10_OR_GREATER OFF)
+    pkg_check_modules(WAYLAND IMPORTED_TARGET REQUIRED wayland-client)
+    if (NOT (WAYLAND_VERSION VERSION_LESS 1.10))
+        set(WAYLAND_1_10_OR_GREATER ON)
+    endif ()
+
+    pkg_check_modules(COGPLATFORM_FDO_DEPS IMPORTED_TARGET REQUIRED
+        wpe-webkit-1.0>=2.24.0 wpebackend-fdo-1.0>=1.3.1 egl xkbcommon)
+
+    target_link_libraries(cogplatform-fdo PRIVATE
+        cogcore PkgConfig::WAYLAND PkgConfig::COGPLATFORM_FDO_DEPS)
+
+    pkg_check_modules(WAYLAND_EGL IMPORTED_TARGET wayland-egl)
+    if (TARGET PkgConfig::WAYLAND_EGL)
+        target_link_libraries(cogplatform-fdo PRIVATE PkgConfig::WAYLAND_EGL)
+    endif ()
 
     install(TARGETS cogplatform-fdo
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
         COMPONENT "runtime"
     )
+
+    # Input methods extension.
+    if (COG_IM_API_SUPPORTED)
+        target_sources(cogplatform-fdo PRIVATE
+            platform/cog-im-context-fdo.c
+            platform/cog-im-context-fdo-v1.c
+        )
+        add_wayland_protocol(cogplatform-fdo CLIENT text-input-unstable-v1)
+        add_wayland_protocol(cogplatform-fdo CLIENT text-input-unstable-v3)
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_IM_API_SUPPORTED=1)
+    else ()
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_IM_API_SUPPORTED=0)
+    endif ()
+
+    # Direct video display extension.
+    find_path(WPEBACKEND_FDO_HAS_VIDEO_PLANE_DISPLAY_DMABUF_EXT
+        NAMES wpe/extensions/video-plane-display-dmabuf.h
+        PATHS ${COGPLATFORM_FDO_DEPS_INCLUDE_DIRS}
+        NO_DEFAULT_PATH
+    )
+
+    if (COG_WESTON_DIRECT_DISPLAY AND WPEBACKEND_FDO_HAS_VIDEO_PLANE_DISPLAY_DMABUF_EXT)
+        pkg_check_modules(LIBWESTON REQUIRED libweston-9-protocols)
+        pkg_get_variable(LIBWESTON_PKG_DATA_DIR libweston-9-protocols "pkgdatadir")
+        add_wayland_protocol(cogplatform-fdo CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-direct-display.xml")
+        add_wayland_protocol(cogplatform-fdo CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-content-protection.xml")
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_ENABLE_WESTON_DIRECT_DISPLAY=1)
+    else ()
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_ENABLE_WESTON_DIRECT_DISPLAY=0)
+    endif ()
+
+    # Optional pointer support
+    pkg_check_modules(WaylandCursor IMPORTED_TARGET wayland-cursor)
+    if (TARGET PkgConfig::WaylandCursor)
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_USE_WAYLAND_CURSOR)
+        target_link_libraries(cogplatform-fdo PRIVATE PkgConfig::WaylandCursor)
+    endif ()
 endif ()  # !COG_USE_WEBKITGTK
 
-# libcogplaform-drm-experimental
+# libcogplaform-drm
 
 if (COG_PLATFORM_DRM AND NOT COG_USE_WEBKITGTK)
-    pkg_check_modules(COGPLATFORM_DRM_DEPS REQUIRED wpe-webkit-1.0>=2.24.0 wpebackend-fdo-1.0>=1.3.1 libdrm>=2.4.71 gbm>=13.0 egl libinput libudev)
+    pkg_check_modules(COGPLATFORM_DRM_DEPS REQUIRED wpe-webkit-1.0>=2.24.0 wpebackend-fdo-1.0>=1.3.1 libdrm>=2.4.71 gbm>=13.0 egl libinput libudev wayland-server)
 
     set(COGPLATFORM_DRM_INCLUDE_DIRS
         ${COGPLATFORM_DRM_DEPS_INCLUDE_DIRS}
@@ -267,13 +309,13 @@ if (COG_PLATFORM_DRM AND NOT COG_USE_WEBKITGTK)
         ${COGPLATFORM_DRM_DEPS_LDFLAGS}
     )
 
-    add_library(cogplatform-drm-experimental MODULE platform/cog-platform-drm.c)
-    set_property(TARGET cogplatform-drm-experimental PROPERTY C_STANDARD 99)
-    target_include_directories(cogplatform-drm-experimental PUBLIC ${COGPLATFORM_DRM_INCLUDE_DIRS})
-    target_compile_options(cogplatform-drm-experimental PUBLIC ${COGPLATFORM_DRM_CFLAGS})
-    target_link_libraries(cogplatform-drm-experimental cogcore ${COGPLATFORM_DRM_LDFLAGS})
+    add_library(cogplatform-drm MODULE platform/cog-platform-drm.c)
+    set_property(TARGET cogplatform-drm PROPERTY C_STANDARD 99)
+    target_include_directories(cogplatform-drm PUBLIC ${COGPLATFORM_DRM_INCLUDE_DIRS})
+    target_compile_options(cogplatform-drm PUBLIC ${COGPLATFORM_DRM_CFLAGS})
+    target_link_libraries(cogplatform-drm cogcore ${COGPLATFORM_DRM_LDFLAGS})
 
-    install(TARGETS cogplatform-drm-experimental
+    install(TARGETS cogplatform-drm
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
         COMPONENT "runtime"
     )

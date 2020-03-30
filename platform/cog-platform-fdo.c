@@ -34,18 +34,61 @@
 
 #include "xdg-shell-client.h"
 #include "fullscreen-shell-unstable-v1-client.h"
+#include "presentation-time-client.h"
+
+#if COG_IM_API_SUPPORTED
+#include "cog-im-context-fdo.h"
+#include "cog-im-context-fdo-v1.h"
+#include "text-input-unstable-v1-client.h"
+#include "text-input-unstable-v3-client.h"
+#endif
+
+#include "linux-dmabuf-unstable-v1-client.h"
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+#include <drm_fourcc.h>
+#include <wpe/extensions/video-plane-display-dmabuf.h>
+#include "weston-direct-display-client-protocol.h"
+#include "weston-content-protection-client-protocol.h"
+#endif
+
+#ifdef COG_USE_WAYLAND_CURSOR
+#include <wayland-cursor.h>
+#endif
 
 #define DEFAULT_WIDTH  1024
 #define DEFAULT_HEIGHT  768
 
 #define DEFAULT_ZOOM_STEP 0.1f
 
-#if defined(WPE_CHECK_VERSION) && WPE_CHECK_VERSION(1, 3, 0)
-# define HAVE_DEVICE_SCALING 1
+#if defined(WPE_CHECK_VERSION)
+# define HAVE_DEVICE_SCALING WPE_CHECK_VERSION(1, 3, 0)
+# define HAVE_2D_AXIS_EVENT WPE_CHECK_VERSION(1, 5, 0) && WEBKIT_CHECK_VERSION(2, 27, 4)
 #else
 # define HAVE_DEVICE_SCALING 0
+# define HAVE_2D_AXIS_EVENT 0
 #endif /* WPE_CHECK_VERSION */
 
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+#define VIDEO_BUFFER_FORMAT DRM_FORMAT_YUYV
+struct video_buffer {
+    struct wl_buffer *buffer;
+
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+    int fd;
+
+    struct wpe_video_plane_display_dmabuf_export* dmabuf_export;
+};
+
+struct video_surface {
+    struct weston_protected_surface *protected_surface;
+    struct wl_surface *wl_surface;
+    struct wl_subsurface *wl_subsurface;
+};
+#endif
 
 #ifndef EGL_WL_create_wayland_buffer_from_image
 typedef struct wl_buffer * (EGLAPIENTRYP PFNEGLCREATEWAYLANDBUFFERFROMIMAGEWL) (EGLDisplay dpy, EGLImageKHR image);
@@ -64,6 +107,7 @@ static struct {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
 
     struct xdg_wm_base *xdg_shell;
     struct zwp_fullscreen_shell_v1 *fshell;
@@ -71,9 +115,29 @@ static struct {
 
     struct wl_seat *seat;
 
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    struct zwp_linux_dmabuf_v1 *dmabuf;
+    struct weston_direct_display_v1 *direct_display;
+    struct weston_content_protection *protection;
+#endif
+
+#ifdef COG_USE_WAYLAND_CURSOR
+    struct wl_shm          *wl_shm;
+    struct wl_cursor_theme *cursor_theme;
+    struct wl_cursor       *cursor_left_ptr;
+    struct wl_surface      *cursor_left_ptr_surface;
+#endif /* COG_USE_WAYLAND_CURSOR */
+
 #if HAVE_DEVICE_SCALING
     struct output_metrics metrics[16];
 #endif /* HAVE_DEVICE_SCALING */
+
+#if COG_IM_API_SUPPORTED
+    struct zwp_text_input_manager_v3 *text_input_manager;
+    struct zwp_text_input_manager_v1 *text_input_manager_v1;
+#endif
+
+    struct wp_presentation *presentation;
 
     struct {
         int32_t scale;
@@ -86,6 +150,13 @@ static struct {
         uint32_t button;
         uint32_t state;
     } pointer;
+
+    struct {
+        bool has_delta;
+        uint32_t time;
+        wl_fixed_t x_delta;
+        wl_fixed_t y_delta;
+    } axis;
 
     struct {
         struct wl_keyboard *obj;
@@ -117,14 +188,14 @@ static struct {
 
 static struct {
     struct egl_display *display;
-    EGLContext context;
-    EGLConfig egl_config;
 } egl_data;
 
 static struct {
     struct wl_surface *wl_surface;
-    struct wl_egl_window *egl_window;
-    EGLSurface egl_surface;
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    GHashTable *video_surfaces;
+#endif
 
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
@@ -136,7 +207,6 @@ static struct {
     bool is_fullscreen;
     bool is_maximized;
 } win_data = {
-    .egl_surface = EGL_NO_SURFACE,
     .width = DEFAULT_WIDTH,
     .height = DEFAULT_HEIGHT,
     .is_fullscreen = false,
@@ -288,12 +358,6 @@ resize_window (void)
 {
     int32_t pixel_width = win_data.width * wl_data.current_output.scale;
     int32_t pixel_height = win_data.height * wl_data.current_output.scale;
-
-    if (win_data.egl_window)
-        wl_egl_window_resize (win_data.egl_window,
-			                  pixel_width,
-			                  pixel_height,
-			                  0, 0);
 
     wpe_view_backend_dispatch_set_size (wpe_view_data.backend,
                                         win_data.width,
@@ -451,6 +515,11 @@ registry_global (void               *data,
                                                name,
                                                &wl_compositor_interface,
                                                version);
+    } else if (strcmp (interface, wl_subcompositor_interface.name) == 0) {
+            wl_data.subcompositor = wl_registry_bind (registry,
+                                                      name,
+                                                      &wl_subcompositor_interface,
+                                                      version);
     } else if (strcmp (interface, wl_shell_interface.name) == 0) {
         wl_data.shell = wl_registry_bind (registry,
                                           name,
@@ -474,6 +543,24 @@ registry_global (void               *data,
                                          name,
                                          &wl_seat_interface,
                                          version);
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    } else if (strcmp (interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+        if (version < 3) {
+            g_warning ("Version %d of the zwp_linux_dmabuf_v1 protocol is not supported", version);
+            return;
+        }
+        wl_data.dmabuf = wl_registry_bind (registry, name, &zwp_linux_dmabuf_v1_interface, version);
+    } else if (strcmp (interface, weston_direct_display_v1_interface.name) == 0) {
+        wl_data.direct_display = wl_registry_bind (registry,
+                                                   name,
+                                                   &weston_direct_display_v1_interface,
+                                                   version);
+    } else if (strcmp (interface, weston_content_protection_interface.name) == 0) {
+        wl_data.protection = wl_registry_bind (registry,
+                                               name,
+                                               &weston_content_protection_interface,
+                                               version);
+#endif /* COG_ENABLE_WESTON_DIRECT_DISPLAY */
 #if HAVE_DEVICE_SCALING
     } else if (strcmp (interface, wl_output_interface.name) == 0) {
         struct wl_output* output = wl_registry_bind (registry,
@@ -495,6 +582,30 @@ registry_global (void               *data,
             g_warning ("Exceeded %" G_GSIZE_FORMAT " connected outputs(!)", G_N_ELEMENTS (wl_data.metrics));
         }
 #endif /* HAVE_DEVICE_SCALING */
+#if COG_IM_API_SUPPORTED
+    } else if (strcmp (interface, zwp_text_input_manager_v3_interface.name) == 0) {
+        wl_data.text_input_manager = wl_registry_bind (registry,
+                                                       name,
+                                                       &zwp_text_input_manager_v3_interface,
+                                                       version);
+    } else if (strcmp (interface, zwp_text_input_manager_v1_interface.name) == 0) {
+        wl_data.text_input_manager_v1 = wl_registry_bind (registry,
+                                                          name,
+                                                          &zwp_text_input_manager_v1_interface,
+                                                          version);
+#endif
+#ifdef COG_USE_WAYLAND_CURSOR
+    } else if (strcmp (interface, wl_shm_interface.name) == 0) {
+        wl_data.wl_shm = wl_registry_bind (registry,
+                                           name,
+                                           &wl_shm_interface,
+                                           version);
+#endif /* COG_USE_WAYLAND_CURSOR */
+    } else if (strcmp (interface, wp_presentation_interface.name) == 0) {
+        wl_data.presentation = wl_registry_bind (registry,
+                                                 name,
+                                                 &wp_presentation_interface,
+                                                 version);
     } else {
         interface_used = FALSE;
     }
@@ -510,6 +621,33 @@ pointer_on_enter (void* data,
                   wl_fixed_t fixed_x,
                   wl_fixed_t fixed_y)
 {
+#ifdef COG_USE_WAYLAND_CURSOR
+    if (wl_data.cursor_left_ptr) {
+        /*
+         * TODO: Take the output device scaling into account and load
+         *       a cursor image of the appropriate size, if possible.
+         */
+        if (!wl_data.cursor_left_ptr_surface) {
+            struct wl_buffer *buffer =
+                wl_cursor_image_get_buffer (wl_data.cursor_left_ptr->images[0]);
+            if (buffer) {
+                struct wl_surface *surface =
+                    wl_compositor_create_surface (wl_data.compositor);
+                wl_surface_attach (surface, buffer, 0, 0);
+                wl_surface_damage (surface, 0, 0,
+                                   wl_data.cursor_left_ptr->images[0]->width,
+                                   wl_data.cursor_left_ptr->images[0]->height);
+                wl_surface_commit (surface);
+                wl_data.cursor_left_ptr_surface = surface;
+            }
+        }
+        wl_pointer_set_cursor (wl_data.pointer.obj,
+                               serial,
+                               wl_data.cursor_left_ptr_surface,
+                               wl_data.cursor_left_ptr->images[0]->hotspot_x,
+                               wl_data.cursor_left_ptr->images[0]->hotspot_y);
+    }
+#endif /* COG_USE_WAYLAND_CURSOR */
 }
 
 static void
@@ -573,22 +711,74 @@ pointer_on_button (void* data,
 }
 
 static void
+dispatch_axis_event ()
+{
+    if (!wl_data.axis.has_delta)
+        return;
+
+#if HAVE_2D_AXIS_EVENT
+    struct wpe_input_axis_2d_event event = { 0, };
+    event.base.type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth;
+    event.base.time = wl_data.axis.time;
+    event.base.x = wl_data.pointer.x * wl_data.current_output.scale;
+    event.base.y = wl_data.pointer.y * wl_data.current_output.scale;
+
+    event.x_axis = wl_fixed_to_double(wl_data.axis.x_delta) * wl_data.current_output.scale;
+    event.y_axis = -wl_fixed_to_double(wl_data.axis.y_delta) * wl_data.current_output.scale;
+
+    wpe_view_backend_dispatch_axis_event (wpe_view_data.backend, &event.base);
+#else
+    struct wpe_input_axis_event event = {
+        wpe_input_axis_event_type_motion,
+        wl_data.axis.time,
+        wl_data.pointer.x * wl_data.current_output.scale,
+        wl_data.pointer.y * wl_data.current_output.scale,
+        0, 0, 0,
+    };
+
+    if (wl_data.axis.x_delta) {
+        event.axis = WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+        event.value = wl_fixed_to_int (wl_data.axis.x_delta) > 0 ? 1 : -1;
+
+        wpe_view_backend_dispatch_axis_event (wpe_view_data.backend, &event);
+    }
+
+    if (wl_data.axis.y_delta) {
+        event.axis = WL_POINTER_AXIS_VERTICAL_SCROLL;
+        event.value = wl_fixed_to_int (wl_data.axis.y_delta) > 0 ? -1 : 1;
+
+        wpe_view_backend_dispatch_axis_event (wpe_view_data.backend, &event);
+    }
+#endif
+
+    wl_data.axis.has_delta = false;
+    wl_data.axis.time = 0;
+    wl_data.axis.x_delta = wl_data.axis.y_delta = 0;
+}
+
+static void
 pointer_on_axis (void* data,
                  struct wl_pointer *pointer,
                  uint32_t time,
                  uint32_t axis,
                  wl_fixed_t value)
 {
-    struct wpe_input_axis_event event = {
-        wpe_input_axis_event_type_motion,
-        time,
-        wl_data.pointer.x * wl_data.current_output.scale,
-        wl_data.pointer.y * wl_data.current_output.scale,
-        axis,
-        wl_fixed_to_int(value) > 0 ? -1 : 1,
-    };
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        wl_data.axis.has_delta = true;
+        wl_data.axis.time = time;
+        wl_data.axis.y_delta += value;
+    }
 
-    wpe_view_backend_dispatch_axis_event (wpe_view_data.backend, &event);
+    if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+        wl_data.axis.has_delta = true;
+        wl_data.axis.time = time;
+        wl_data.axis.x_delta += value;
+    }
+
+#if !WAYLAND_1_10_OR_GREATER
+    // No 'frame' event in this case, so dispatch immediately.
+    dispatch_axis_event ();
+#endif
 }
 
 #if WAYLAND_1_10_OR_GREATER
@@ -600,6 +790,8 @@ pointer_on_frame (void* data,
     /* @FIXME: buffer pointer events and handle them in frame. That's the
      * recommended usage of this interface.
      */
+
+    dispatch_axis_event();
 }
 
 static void
@@ -654,7 +846,8 @@ keyboard_on_keymap (void *data,
         return;
     }
 
-    void* mapping = mmap (NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    int map_mode = wl_seat_interface.version > 6 ? MAP_PRIVATE : MAP_SHARED;
+    void* mapping = mmap (NULL, size, PROT_READ, map_mode, fd, 0);
     if (mapping == MAP_FAILED) {
         close (fd);
         return;
@@ -771,6 +964,9 @@ capture_app_key_bindings (uint32_t keysym,
 static void
 handle_key_event (uint32_t key, uint32_t state, uint32_t time)
 {
+    if (xkb_data.state == NULL)
+        return;
+
     uint32_t keysym = xkb_state_key_get_one_sym (xkb_data.state, key);
     uint32_t unicode = xkb_state_key_get_utf32 (xkb_data.state, key);
 
@@ -839,7 +1035,8 @@ keyboard_on_key (void *data,
         memset (&wl_data.keyboard.repeat_data,
                 0x00,
                 sizeof (wl_data.keyboard.repeat_data));
-    } else if (state == WL_KEYBOARD_KEY_STATE_PRESSED
+    } else if (xkb_data.keymap != NULL
+               && state == WL_KEYBOARD_KEY_STATE_PRESSED
                && xkb_keymap_key_repeats (xkb_data.keymap, key)) {
         if (wl_data.keyboard.repeat_data.event_source)
             g_source_remove (wl_data.keyboard.repeat_data.event_source);
@@ -862,6 +1059,9 @@ keyboard_on_modifiers (void *data,
                        uint32_t mods_locked,
                        uint32_t group)
 {
+    if (xkb_data.state == NULL)
+        return;
+
     xkb_state_update_mask (xkb_data.state,
                            mods_depressed,
                            mods_latched,
@@ -1140,15 +1340,47 @@ static const struct wl_callback_listener frame_listener = {
 };
 
 static void
+on_presentation_feedback_sync_output (void *data, struct wp_presentation_feedback *presentation_feedback, struct wl_output *output)
+{
+}
+
+static void
+on_presentation_feedback_presented (void *data, struct wp_presentation_feedback *presentation_feedback,
+    uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec, uint32_t refresh,
+    uint32_t seq_hi, uint32_t seq_lo, uint32_t flags)
+{
+    wp_presentation_feedback_destroy (presentation_feedback);
+}
+
+static void
+on_presentation_feedback_discarded (void *data, struct wp_presentation_feedback *presentation_feedback)
+{
+    wp_presentation_feedback_destroy (presentation_feedback);
+}
+
+static const struct wp_presentation_feedback_listener presentation_feedback_listener = {
+    .sync_output = on_presentation_feedback_sync_output,
+    .presented = on_presentation_feedback_presented,
+    .discarded = on_presentation_feedback_discarded
+};
+
+static void
 request_frame (void)
 {
-    if (wpe_view_data.frame_callback != NULL)
-        return;
+    if (wpe_view_data.frame_callback == NULL) {
+        wpe_view_data.frame_callback = wl_surface_frame (win_data.wl_surface);
+        wl_callback_add_listener (wpe_view_data.frame_callback,
+                                  &frame_listener,
+                                  NULL);
+    }
 
-    wpe_view_data.frame_callback = wl_surface_frame (win_data.wl_surface);
-    wl_callback_add_listener (wpe_view_data.frame_callback,
-                              &frame_listener,
-                              NULL);
+    if (wl_data.presentation != NULL) {
+        struct wp_presentation_feedback *presentation_feedback = wp_presentation_feedback (wl_data.presentation,
+                                                                        win_data.wl_surface);
+        wp_presentation_feedback_add_listener (presentation_feedback,
+                                               &presentation_feedback_listener,
+                                               NULL);
+    }
 }
 
 static void
@@ -1163,6 +1395,37 @@ on_buffer_release (void* data, struct wl_buffer* buffer)
 static const struct wl_buffer_listener buffer_listener = {
     .release = on_buffer_release,
 };
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+static void
+on_dmabuf_surface_frame (void *data, struct wl_callback *callback, uint32_t time)
+{
+    // for WAYLAND_DEBUG=1 purposes only
+    wl_callback_destroy (callback);
+}
+
+static const struct wl_callback_listener dmabuf_frame_listener = {
+    .done = on_dmabuf_surface_frame,
+};
+
+static void
+on_dmabuf_buffer_release (void* data, struct wl_buffer* buffer)
+{
+    struct video_buffer *data_buffer = data;
+    if (data_buffer->fd >= 0)
+        close(data_buffer->fd);
+
+    if (data_buffer->dmabuf_export)
+        wpe_video_plane_display_dmabuf_export_release(data_buffer->dmabuf_export);
+
+    g_slice_free (struct video_buffer, data_buffer);
+    g_clear_pointer (&buffer, wl_buffer_destroy);
+}
+
+static const struct wl_buffer_listener dmabuf_buffer_listener = {
+    .release = on_dmabuf_buffer_release,
+};
+#endif /* COG_ENABLE_WESTON_DIRECT_DISPLAY */
 
 static void
 on_export_fdo_egl_image(void *data, struct wpe_fdo_egl_exported_image *image)
@@ -1202,6 +1465,128 @@ on_export_fdo_egl_image(void *data, struct wpe_fdo_egl_exported_image *image)
     wl_surface_commit (win_data.wl_surface);
 }
 
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+static void
+create_succeeded(void *data, struct zwp_linux_buffer_params_v1 *params, struct wl_buffer *new_buffer)
+{
+	zwp_linux_buffer_params_v1_destroy (params);
+
+	struct video_buffer *buffer = data;
+	buffer->buffer = new_buffer;
+}
+
+static void
+create_failed(void *data, struct zwp_linux_buffer_params_v1 *params)
+{
+	zwp_linux_buffer_params_v1_destroy (params);
+
+    struct video_buffer *buffer = data;
+    buffer->buffer = NULL;
+}
+
+static const struct zwp_linux_buffer_params_v1_listener params_listener = {
+	.created = create_succeeded,
+	.failed = create_failed
+};
+
+static void
+destroy_video_surface (gpointer data)
+{
+    struct video_surface *surface = (struct video_surface*) data;
+
+    g_clear_pointer (&surface->protected_surface, weston_protected_surface_destroy);
+    g_clear_pointer (&surface->wl_subsurface, wl_subsurface_destroy);
+    g_clear_pointer (&surface->wl_surface, wl_surface_destroy);
+    g_slice_free (struct video_surface, surface);
+}
+
+static void
+on_video_plane_display_dmabuf_receiver_handle_dmabuf (void* data, struct wpe_video_plane_display_dmabuf_export* dmabuf_export, uint32_t id, int fd, int32_t x, int32_t y, int32_t width, int32_t height, uint32_t stride)
+{
+    if (fd < 0)
+        return;
+
+    if (!wl_data.dmabuf) {
+        // TODO: Replace with g_warning_once() after bumping our GLib requirement.
+        static bool warning_emitted = false;
+        if (!warning_emitted) {
+            g_warning ("DMABuf not supported by the compositor. Video won't be rendered");
+            warning_emitted = true;
+        }
+        return;
+    }
+
+    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+    struct zwp_linux_buffer_params_v1 *params = zwp_linux_dmabuf_v1_create_params (wl_data.dmabuf);
+    if (wl_data.direct_display != NULL)
+        weston_direct_display_v1_enable (wl_data.direct_display, params);
+
+    struct video_surface *surf = (struct video_surface*) g_hash_table_lookup (win_data.video_surfaces, GUINT_TO_POINTER(id));
+    if (!surf) {
+        surf = g_slice_new0 (struct video_surface);
+        surf->wl_subsurface = NULL;
+        surf->wl_surface = wl_compositor_create_surface (wl_data.compositor);
+
+        if (wl_data.protection) {
+            surf->protected_surface = weston_content_protection_get_protection (wl_data.protection, surf->wl_surface);
+            //weston_protected_surface_set_type(surf->protected_surface, WESTON_PROTECTED_SURFACE_TYPE_DC_ONLY);
+
+            weston_protected_surface_enforce (surf->protected_surface);
+        }
+        g_hash_table_insert (win_data.video_surfaces, GUINT_TO_POINTER (id), surf);
+    }
+
+    zwp_linux_buffer_params_v1_add (params, fd, 0, 0, stride, modifier >> 32, modifier & 0xffffffff);
+
+    if ((x + width) > win_data.width)
+        width -= x;
+
+    if ((y + height) > win_data.height)
+        height -= y;
+
+    struct video_buffer *buffer = g_slice_new0 (struct video_buffer);
+    buffer->fd = fd;
+    buffer->x = x;
+    buffer->y = y;
+    buffer->width = width;
+    buffer->height = height;
+	zwp_linux_buffer_params_v1_add_listener (params, &params_listener, buffer);
+
+    buffer->buffer = zwp_linux_buffer_params_v1_create_immed (params, buffer->width, buffer->height, VIDEO_BUFFER_FORMAT, 0);
+    zwp_linux_buffer_params_v1_destroy (params);
+
+    buffer->dmabuf_export = dmabuf_export;
+    wl_buffer_add_listener (buffer->buffer, &dmabuf_buffer_listener, buffer);
+
+    wl_surface_attach (surf->wl_surface, buffer->buffer, 0, 0);
+    wl_surface_damage (surf->wl_surface, 0, 0, buffer->width, buffer->height);
+
+    struct wl_callback *callback = wl_surface_frame (surf->wl_surface);
+    wl_callback_add_listener (callback, &dmabuf_frame_listener, NULL);
+
+    if (!surf->wl_subsurface) {
+        surf->wl_subsurface = wl_subcompositor_get_subsurface (wl_data.subcompositor,
+                                                               surf->wl_surface,
+                                                               win_data.wl_surface);
+        wl_subsurface_set_sync (surf->wl_subsurface);
+    }
+
+    wl_subsurface_set_position (surf->wl_subsurface, buffer->x, buffer->y);
+    wl_surface_commit (surf->wl_surface);
+}
+
+static void
+on_video_plane_display_dmabuf_receiver_end_of_stream (void* data, uint32_t id)
+{
+    g_hash_table_remove (win_data.video_surfaces, GUINT_TO_POINTER (id));
+}
+
+static const struct wpe_video_plane_display_dmabuf_receiver video_plane_display_dmabuf_receiver = {
+    .handle_dmabuf = on_video_plane_display_dmabuf_receiver_handle_dmabuf,
+    .end_of_stream = on_video_plane_display_dmabuf_receiver_end_of_stream,
+};
+#endif
+
 static gboolean
 init_wayland (GError **error)
 {
@@ -1221,6 +1606,19 @@ init_wayland (GError **error)
                               &registry_listener,
                               NULL);
     wl_display_roundtrip (wl_data.display);
+
+#if COG_USE_WAYLAND_CURSOR
+    if (wl_data.wl_shm) {
+        if (!(wl_data.cursor_theme = wl_cursor_theme_load (NULL,
+                                                           32,
+                                                           wl_data.wl_shm))) {
+            g_warning ("%s: Could not load cursor theme.", G_STRFUNC);
+        } else if (!(wl_data.cursor_left_ptr =
+                     wl_cursor_theme_get_cursor (wl_data.cursor_theme, "left_ptr"))) {
+            g_warning ("%s: Could not load left_ptr cursor.", G_STRFUNC);
+        }
+    }
+#endif /* COG_USE_WAYLAND_CURSOR */
 
     g_assert (wl_data.compositor);
     g_assert (wl_data.xdg_shell != NULL ||
@@ -1242,8 +1640,19 @@ clear_wayland (void)
     if (wl_data.shell != NULL)
         wl_shell_destroy (wl_data.shell);
 
-    if (wl_data.compositor != NULL)
-        wl_compositor_destroy (wl_data.compositor);
+    g_clear_pointer (&wl_data.subcompositor, wl_subcompositor_destroy);
+    g_clear_pointer (&wl_data.compositor, wl_compositor_destroy);
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    g_clear_pointer (&wl_data.protection, weston_content_protection_destroy);
+    g_clear_pointer (&wl_data.direct_display, weston_direct_display_v1_destroy);
+#endif
+
+#ifdef COG_USE_WAYLAND_CURSOR
+    g_clear_pointer (&wl_data.cursor_left_ptr_surface, wl_surface_destroy);
+    g_clear_pointer (&wl_data.cursor_theme, wl_cursor_theme_destroy);
+    g_clear_pointer (&wl_data.wl_shm, wl_shm_destroy);
+#endif /* COG_USE_WAYLAND_CURSOR */
 
     wl_registry_destroy (wl_data.registry);
     wl_display_flush (wl_data.display);
@@ -1285,52 +1694,6 @@ init_egl (GError **error)
     }
     g_info ("EGL version %d.%d initialized.", major, minor);
 
-    if (!eglBindAPI (EGL_OPENGL_ES_API)) {
-        ERR_EGL (error, "Could not bind OpenGL ES API to EGL");
-        clear_egl ();
-        return FALSE;
-    }
-
-    static const EGLint context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
-
-    static const EGLint config_attribs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RED_SIZE,     8,
-        EGL_GREEN_SIZE,   8,
-        EGL_BLUE_SIZE,    8,
-        EGL_ALPHA_SIZE,   0,
-        EGL_DEPTH_SIZE,   0,
-        EGL_STENCIL_SIZE, 0,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_SAMPLES, 0,
-        EGL_NONE
-    };
-
-    EGLint num_configs;
-    if (!eglChooseConfig (egl_data.display,
-                          config_attribs,
-                          &egl_data.egl_config,
-                          1,
-                          &num_configs)) {
-        ERR_EGL (error, "Could not find a suitable EGL configuration");
-        clear_egl ();
-        return FALSE;
-    }
-    g_assert (num_configs > 0);
-
-    egl_data.context = eglCreateContext (egl_data.display,
-                                         egl_data.egl_config,
-                                         EGL_NO_CONTEXT,
-                                         context_attribs);
-    if (egl_data.context == EGL_NO_CONTEXT) {
-        ERR_EGL (error, "Could not create EGL context");
-        clear_egl ();
-        return FALSE;
-    }
-
     return TRUE;
 }
 
@@ -1338,11 +1701,7 @@ static void
 clear_egl (void)
 {
     if (egl_data.display != EGL_NO_DISPLAY) {
-        if (egl_data.context != EGL_NO_CONTEXT) {
-            eglDestroyContext (egl_data.display, egl_data.context);
-        }
         eglTerminate (egl_data.display);
-        egl_data.context = EGL_NO_CONTEXT;
         egl_data.display = EGL_NO_DISPLAY;
     }
     eglReleaseThread ();
@@ -1355,6 +1714,10 @@ create_window (GError **error)
 
     win_data.wl_surface = wl_compositor_create_surface (wl_data.compositor);
     g_assert (win_data.wl_surface);
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    win_data.video_surfaces = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, destroy_video_surface);
+#endif
 
 #if HAVE_DEVICE_SCALING
     wl_surface_add_listener (win_data.wl_surface, &surface_listener, NULL);
@@ -1446,23 +1809,14 @@ create_window (GError **error)
 static void
 destroy_window (void)
 {
-    if (egl_data.display != EGL_NO_DISPLAY) {
-        eglMakeCurrent (egl_data.display,
-                        EGL_NO_SURFACE,
-                        EGL_NO_SURFACE,
-                        EGL_NO_CONTEXT);
-
-        if (win_data.egl_surface) {
-            eglDestroySurface (egl_data.display, win_data.egl_surface);
-            win_data.egl_surface = EGL_NO_DISPLAY;
-        }
-    }
-
-    g_clear_pointer (&win_data.egl_window, wl_egl_window_destroy);
     g_clear_pointer (&win_data.xdg_toplevel, xdg_toplevel_destroy);
     g_clear_pointer (&win_data.xdg_surface, xdg_surface_destroy);
     g_clear_pointer (&win_data.shell_surface, wl_shell_surface_destroy);
     g_clear_pointer (&win_data.wl_surface, wl_surface_destroy);
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    g_clear_pointer (&win_data.video_surfaces, g_hash_table_destroy);
+#endif
 }
 
 static gboolean
@@ -1482,6 +1836,21 @@ init_input (GError **error)
                 xkb_compose_state_new (xkb_data.compose_table,
                                        XKB_COMPOSE_STATE_NO_FLAGS);
         }
+
+#if COG_IM_API_SUPPORTED
+        if (wl_data.text_input_manager != NULL) {
+            struct zwp_text_input_v3 *text_input =
+                zwp_text_input_manager_v3_get_text_input (wl_data.text_input_manager,
+                                                          wl_data.seat);
+            cog_im_context_fdo_set_text_input (text_input);
+        } else if (wl_data.text_input_manager_v1 != NULL) {
+            struct zwp_text_input_v1 *text_input =
+                zwp_text_input_manager_v1_create_text_input (wl_data.text_input_manager_v1);
+            cog_im_context_fdo_v1_set_text_input (text_input,
+                                                  wl_data.seat,
+                                                  win_data.wl_surface);
+        }
+#endif
     }
 
     return TRUE;
@@ -1494,6 +1863,13 @@ clear_input (void)
     g_clear_pointer (&wl_data.keyboard.obj, wl_keyboard_destroy);
     g_clear_pointer (&wl_data.seat, wl_seat_destroy);
 
+#if COG_IM_API_SUPPORTED
+    cog_im_context_fdo_set_text_input (NULL);
+    g_clear_pointer (&wl_data.text_input_manager, zwp_text_input_manager_v3_destroy);
+    cog_im_context_fdo_v1_set_text_input (NULL, NULL, NULL);
+    g_clear_pointer (&wl_data.text_input_manager_v1, zwp_text_input_manager_v1_destroy);
+#endif
+
     g_clear_pointer (&xkb_data.state, xkb_state_unref);
     g_clear_pointer (&xkb_data.compose_state, xkb_compose_state_unref);
     g_clear_pointer (&xkb_data.compose_table, xkb_compose_table_unref);
@@ -1502,10 +1878,10 @@ clear_input (void)
 }
 
 gboolean
-cog_platform_setup (CogPlatform *platform,
-                    CogShell    *shell G_GNUC_UNUSED,
-                    const char  *params,
-                    GError     **error)
+cog_platform_plugin_setup (CogPlatform *platform,
+                           CogShell    *shell G_GNUC_UNUSED,
+                           const char  *params,
+                           GError     **error)
 {
     g_assert (platform);
     g_return_val_if_fail (COG_IS_SHELL (shell), FALSE);
@@ -1542,11 +1918,15 @@ cog_platform_setup (CogPlatform *platform,
     /* init WPE host data */
     wpe_fdo_initialize_for_egl_display (egl_data.display);
 
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+    wpe_video_plane_display_dmabuf_register_receiver (&video_plane_display_dmabuf_receiver, NULL);
+#endif
+
     return TRUE;
 }
 
 void
-cog_platform_teardown (CogPlatform *platform)
+cog_platform_plugin_teardown (CogPlatform *platform)
 {
     g_assert (platform);
 
@@ -1575,9 +1955,9 @@ cog_platform_teardown (CogPlatform *platform)
 }
 
 WebKitWebViewBackend*
-cog_platform_get_view_backend (CogPlatform   *platform,
-                               WebKitWebView *related_view,
-                               GError       **error)
+cog_platform_plugin_get_view_backend (CogPlatform   *platform,
+                                      WebKitWebView *related_view,
+                                      GError       **error)
 {
     static struct wpe_view_backend_exportable_fdo_egl_client exportable_egl_client = {
         .export_fdo_egl_image = on_export_fdo_egl_image,
@@ -1595,6 +1975,11 @@ cog_platform_get_view_backend (CogPlatform   *platform,
         wpe_view_backend_exportable_fdo_get_view_backend (wpe_host_data.exportable);
     g_assert (wpe_view_data.backend);
 
+#if COG_IM_API_SUPPORTED
+    if (wl_data.text_input_manager_v1 != NULL)
+        cog_im_context_fdo_v1_set_view_backend (wpe_view_data.backend);
+#endif
+
     WebKitWebViewBackend *wk_view_backend =
         webkit_web_view_backend_new (wpe_view_data.backend,
                        (GDestroyNotify) wpe_view_backend_exportable_fdo_destroy,
@@ -1609,3 +1994,15 @@ cog_platform_get_view_backend (CogPlatform   *platform,
 
     return wk_view_backend;
 }
+
+#if COG_IM_API_SUPPORTED
+WebKitInputMethodContext*
+cog_platform_plugin_create_im_context (CogPlatform *platform)
+{
+    if (wl_data.text_input_manager)
+        return cog_im_context_fdo_new ();
+    if (wl_data.text_input_manager_v1)
+        return cog_im_context_fdo_v1_new ();
+    return NULL;
+}
+#endif
