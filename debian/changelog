@@ -3,6 +3,8 @@ cog (0.8.0-1) UNRELEASED; urgency=medium
   * New upstream release.
   * debian/patches/use-fdo-backend.patch:
     - Refresh patch.
+  * debian/control:
+    - Add build dependency on libcairo-dev.
 
  -- Alberto Garcia <berto@igalia.com>  Mon, 14 Sep 2020 15:52:50 +0200
 
