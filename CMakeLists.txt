@@ -4,7 +4,7 @@ list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
 include(GNUInstallDirs)
 
-set_project_version(0 6 0)
+set_project_version(0 8 0)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -13,7 +13,7 @@ set_project_version(0 6 0)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 3 1 2)
+calculate_library_versions_from_libtool_triple(COGCORE 4 2 3)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
 include(DistTargets)
@@ -134,6 +134,11 @@ else ()
         set(COG_IM_API_SUPPORTED ON)
     else ()
         set(COG_IM_API_SUPPORTED OFF)
+    endif ()
+    if (COG_PLATFORM_FDO AND "${WEB_ENGINE_VERSION}" VERSION_GREATER "2.27.3")
+        set(COG_FDO_WIDGETS_SUPPORTED ON)
+    else ()
+        set(COG_FDO_WIDGETS_SUPPORTED OFF)
     endif ()
 endif ()
 
@@ -264,9 +269,29 @@ if (COG_PLATFORM_FDO AND NOT COG_USE_WEBKITGTK)
         )
         add_wayland_protocol(cogplatform-fdo CLIENT text-input-unstable-v1)
         add_wayland_protocol(cogplatform-fdo CLIENT text-input-unstable-v3)
+        target_compile_options(cogcore PRIVATE -DCOG_IM_API_SUPPORTED=1)
+        if (COG_BUILD_PROGRAMS)
+            target_compile_options(cog PRIVATE -DCOG_IM_API_SUPPORTED=1)
+        endif ()
         target_compile_definitions(cogplatform-fdo PRIVATE COG_IM_API_SUPPORTED=1)
     else ()
+        target_compile_options(cogcore PRIVATE -DCOG_IM_API_SUPPORTED=0)
+        if (COG_BUILD_PROGRAMS)
+            target_compile_options(cog PRIVATE -DCOG_IM_API_SUPPORTED=0)
+        endif ()
         target_compile_definitions(cogplatform-fdo PRIVATE COG_IM_API_SUPPORTED=0)
+    endif ()
+
+    if (COG_FDO_WIDGETS_SUPPORTED)
+        pkg_check_modules(CAIRO IMPORTED_TARGET cairo)
+        target_link_libraries(cogplatform-fdo PRIVATE PkgConfig::CAIRO)
+        target_sources(cogplatform-fdo PRIVATE
+            platform/cog-popup-menu-fdo.c
+            platform/os-compatibility.c
+        )
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_FDO_WIDGETS_SUPPORTED=1)
+    else ()
+        target_compile_definitions(cogplatform-fdo PRIVATE COG_FDO_WIDGETS_SUPPORTED=0)
     endif ()
 
     # Direct video display extension.
