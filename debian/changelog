@@ -1,4 +1,4 @@
-cog (0.8.0-1) UNRELEASED; urgency=medium
+cog (0.8.0-1) unstable; urgency=medium
 
   * New upstream release.
   * debian/patches/use-fdo-backend.patch:
@@ -6,7 +6,7 @@ cog (0.8.0-1) UNRELEASED; urgency=medium
   * debian/control:
     - Add build dependency on libcairo-dev.
 
- -- Alberto Garcia <berto@igalia.com>  Mon, 14 Sep 2020 15:52:50 +0200
+ -- Alberto Garcia <berto@igalia.com>  Mon, 14 Sep 2020 17:24:21 +0200
 
 cog (0.6.0-1) unstable; urgency=medium
 
