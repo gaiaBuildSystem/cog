@@ -53,6 +53,7 @@ static struct {
         enum webprocess_fail_action action_id;
     } on_failure;
     char *web_extensions_dir;
+    gboolean ignore_tls_errors;
 } s_options = {
     .scale_factor = 1.0,
 #if HAVE_DEVICE_SCALING
@@ -103,6 +104,8 @@ static GOptionEntry s_cli_options[] =
     { "web-extensions-dir", '\0', 0, G_OPTION_ARG_STRING, &s_options.web_extensions_dir,
       "Load Web Extensions from given directory.",
       "PATH"},
+    { "ignore-tls-errors", '\0', 0, G_OPTION_ARG_NONE, &s_options.ignore_tls_errors,
+        "Ignore TLS errors (default: disabled).", NULL },
     { G_OPTION_REMAINING, '\0', 0, G_OPTION_ARG_FILENAME_ARRAY, &s_options.arguments,
         "", "[URL]" },
     { NULL }
@@ -277,12 +280,19 @@ on_handle_local_options (GApplication *application,
                         g_get_prgname (), error->message);
             return EXIT_FAILURE;
         }
+
+        g_object_set (shell, "config-file", g_key_file_ref (key_file), NULL);
     }
 
     if (s_options.web_extensions_dir != NULL) {
         webkit_web_context_set_web_extensions_directory (cog_shell_get_web_context (shell),
                                                          s_options.web_extensions_dir);
     }
+
+    webkit_web_context_set_tls_errors_policy (cog_shell_get_web_context (shell),
+                                              s_options.ignore_tls_errors
+                                              ? WEBKIT_TLS_ERRORS_POLICY_IGNORE
+                                              : WEBKIT_TLS_ERRORS_POLICY_FAIL);
 
     return -1;  /* Continue startup. */
 }
@@ -343,6 +353,13 @@ on_shutdown (CogLauncher *launcher G_GNUC_UNUSED, void *user_data G_GNUC_UNUSED)
 }
 #endif // !COG_USE_WEBKITGTK
 
+static void*
+on_web_view_create (WebKitWebView          *web_view,
+                    WebKitNavigationAction *action)
+{
+    webkit_web_view_load_request (web_view, webkit_navigation_action_get_request (action));
+    return NULL;
+}
 
 static WebKitWebView*
 on_create_view (CogShell *shell, void *user_data G_GNUC_UNUSED)
@@ -396,10 +413,16 @@ on_create_view (CogShell *shell, void *user_data G_GNUC_UNUSED)
 #endif
                                                       NULL);
 
-#if !COG_USE_WEBKITGTK && COG_IM_API_SUPPORTED
+    g_signal_connect (web_view, "create", G_CALLBACK (on_web_view_create), NULL);
+
+#if !COG_USE_WEBKITGTK
     if (s_options.platform) {
+        cog_platform_init_web_view (s_options.platform, web_view);
+
+#if COG_IM_API_SUPPORTED
         g_autoptr(WebKitInputMethodContext) im_context = cog_platform_create_im_context (s_options.platform);
         webkit_web_view_set_input_method_context (web_view, im_context);
+#endif
     }
 #endif
 

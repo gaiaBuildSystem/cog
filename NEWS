@@ -1,20 +1,33 @@
+==========================
+0.8.0 - September 12, 2020
+==========================
+
+- This release does not contain changes over the 0.7.90 development release.
+
+==========================
+0.7.90 - September 4, 2020
+==========================
+
+- cog: Added the --ignore-tls-errors command line option which allows ignoring
+  TLS certificate validation errors.
+- cog: Fixed navigation in some sites by following URI passed to window.open()
+  loading them in the active view.
+- fdo: Improve the logic to set the opaque region of the Wayland surface if it
+  could have changed between exported frames, which saves some CPU time.
+- drm: Support choosing the video mode to use using the
+  COG_PLATFORM_DRM_VIDEO_MODE environment variable.
+
+
 ======================
-0.6.0 - March 30, 2020
+0.7.1 - April 11, 2020
 ======================
 
-- fdo: Use wayland-cursor if available to set a default pointer cursor.
-- fdo: Fix crashes due to unchecked usage of libxkbcommon structures.
-- fdo: Fix wrong offsets in input deletions done by input methods.
-
-=====================
-0.5.1 - March 2, 2020
-=====================
-
-- fdo: Added support for Input Methods.
-- fdo: Added support for smooth scrolling using 2D axis events.
-- fdo: Added support for direct-display video rendering.
-- drm: The DRM platform module is no longer experimental.
-- New manual pages for cog and cogctl.
+- Support keeping a reference to the configuration file, which platform
+  plug-ins can use to obtain their own configuration options.
+- fdo: Added support for option menus.
+- fdo: Set a default pointer cursor.
+- fdo: Removed redundant EGL state.
+- fdo: Fix possible usage of uninitialized libxkbcommon structures.
 
 =====================
 0.3.1 - June 28, 2018
