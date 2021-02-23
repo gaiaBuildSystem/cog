@@ -2,9 +2,8 @@ cmake_minimum_required (VERSION 3.3)
 
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
-include(GNUInstallDirs)
 
-set_project_version(0 8 0)
+set_project_version(0 8 1)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -13,10 +12,11 @@ set_project_version(0 8 0)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 4 2 3)
+calculate_library_versions_from_libtool_triple(COGCORE 4 3 3)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
 include(DistTargets)
+include(GNUInstallDirs)
 
 set(COG_VERSION_EXTRA "")
 if (IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
@@ -294,14 +294,16 @@ if (COG_PLATFORM_FDO AND NOT COG_USE_WEBKITGTK)
         target_compile_definitions(cogplatform-fdo PRIVATE COG_FDO_WIDGETS_SUPPORTED=0)
     endif ()
 
-    # Direct video display extension.
-    find_path(WPEBACKEND_FDO_HAS_VIDEO_PLANE_DISPLAY_DMABUF_EXT
-        NAMES wpe/extensions/video-plane-display-dmabuf.h
-        PATHS ${COGPLATFORM_FDO_DEPS_INCLUDE_DIRS}
-        NO_DEFAULT_PATH
-    )
+    if (COG_WESTON_DIRECT_DISPLAY)
 
-    if (COG_WESTON_DIRECT_DISPLAY AND WPEBACKEND_FDO_HAS_VIDEO_PLANE_DISPLAY_DMABUF_EXT)
+        # Direct video display extension.
+        find_path(WPEBACKEND_FDO_HAS_VIDEO_PLANE_DISPLAY_DMABUF_EXT
+            NAMES wpe/extensions/video-plane-display-dmabuf.h
+            PATHS ${WpeFDO_INCLUDE_DIRS}
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+
         pkg_check_modules(LIBWESTON REQUIRED libweston-9-protocols)
         pkg_get_variable(LIBWESTON_PKG_DATA_DIR libweston-9-protocols "pkgdatadir")
         add_wayland_protocol(cogplatform-fdo CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-direct-display.xml")

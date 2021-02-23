@@ -16,6 +16,8 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
+#include "common/egl-proc-address.h"
+
 
 #if !defined(EGL_EXT_platform_base)
 typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platform, void *native_display, const EGLint *attrib_list);
@@ -137,7 +139,7 @@ destroy_buffer_notify (struct wl_listener *listener, void *data)
 }
 
 static void
-clear_drm (void)
+clear_buffers (void)
 {
     drm_data.committed_buffer = NULL;
 
@@ -149,7 +151,11 @@ clear_drm (void)
         destroy_buffer (buffer);
     }
     wl_list_init (&drm_data.buffer_list);
+}
 
+static void
+clear_drm (void)
+{
     g_clear_pointer (&drm_data.encoder, drmModeFreeEncoder);
     g_clear_pointer (&drm_data.connector, drmModeFreeConnector);
     if (drm_data.fd != -1) {
@@ -385,7 +391,7 @@ init_egl (void)
 {
     static PFNEGLGETPLATFORMDISPLAYEXTPROC s_eglGetPlatformDisplay = NULL;
     if (!s_eglGetPlatformDisplay)
-        s_eglGetPlatformDisplay = (PFNEGLGETPLATFORMDISPLAYEXTPROC) eglGetProcAddress ("eglGetPlatformDisplayEXT");
+        s_eglGetPlatformDisplay = (PFNEGLGETPLATFORMDISPLAYEXTPROC) load_egl_proc_address ("eglGetPlatformDisplayEXT");
 
     if (s_eglGetPlatformDisplay)
         egl_data.display = s_eglGetPlatformDisplay (EGL_PLATFORM_GBM_KHR, gbm_data.device, NULL);
@@ -415,16 +421,22 @@ input_handle_key_event (struct libinput_event_keyboard *key_event)
     // Explanation for the offset-by-8, copied from Weston:
     //   evdev XKB rules reflect X's  broken keycode system, which starts at 8
     uint32_t key = libinput_event_keyboard_get_key (key_event) + 8;
-
-    uint32_t keysym = xkb_state_key_get_one_sym (state, key);
-    uint32_t unicode = xkb_state_key_get_utf32 (state, key);
-
     enum libinput_key_state key_state = libinput_event_keyboard_get_key_state (key_event);
+    uint32_t keysym = wpe_input_xkb_context_get_key_code(default_context, key, !!key_state);
+
+    xkb_state_update_key(state, key, !!key_state ? XKB_KEY_DOWN : XKB_KEY_UP);
+    uint32_t modifiers = wpe_input_xkb_context_get_modifiers(default_context,
+        xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+        xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
+        xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
+        xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE));
+
     struct wpe_input_keyboard_event event = {
-        .time = libinput_event_keyboard_get_time (key_event),
-        .key_code = keysym,
-        .hardware_key_code = unicode,
-        .pressed = (key_state == LIBINPUT_KEY_STATE_PRESSED),
+            .time = libinput_event_keyboard_get_time (key_event),
+            .key_code = keysym,
+            .hardware_key_code = key,
+            .pressed = (!!key_state),
+            .modifiers = modifiers,
     };
 
     wpe_view_backend_dispatch_keyboard_event (wpe_view_data.backend, &event);
@@ -821,7 +833,7 @@ cog_platform_plugin_teardown (CogPlatform *platform)
 {
     g_assert (platform);
 
-    g_clear_pointer (&drm_data.committed_buffer, destroy_buffer);
+    clear_buffers ();
 
     clear_glib ();
     clear_input ();
