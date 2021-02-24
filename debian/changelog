@@ -5,6 +5,8 @@ cog (0.8.1-1) UNRELEASED; urgency=medium
     - Update copyright years.
   * debian/watch:
     - Set version to 4 (fixes older-debian-watch-file-standard).
+  * debian/control:
+    - Update Standards-Version to 4.5.1 (no changes).
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 23 Feb 2021 11:42:47 +0100
 
