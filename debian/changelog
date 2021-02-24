@@ -3,6 +3,8 @@ cog (0.8.1-1) UNRELEASED; urgency=medium
   * New upstream release.
   * debian/copyright:
     - Update copyright years.
+  * debian/watch:
+    - Set version to 4 (fixes older-debian-watch-file-standard).
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 23 Feb 2021 11:42:47 +0100
 
