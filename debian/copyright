@@ -3,7 +3,7 @@ Upstream-Name: cog
 Source: https://wpewebkit.org/releases/
 
 Files: *
-Copyright: © 2017-2020 Igalia, S.L.
+Copyright: © 2017-2021 Igalia, S.L.
 License: Expat
 
 Files: cmake/FindWaylandProtocols.cmake
@@ -12,7 +12,7 @@ Copyright: © 2019 Igalia, S.L.
 License: BSD-2-clause
 
 Files: debian/*
-Copyright: 2020 Alberto Garcia <berto@igalia.com>
+Copyright: 2021 Alberto Garcia <berto@igalia.com>
 License: Expat
 
 License: Expat
