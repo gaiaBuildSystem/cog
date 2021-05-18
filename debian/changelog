@@ -1,6 +1,8 @@
 cog (0.10.0-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * debian/control:
+    - Add build dependencies on libdrm-dev, libgbm-dev and libinput-dev.
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 18 May 2021 17:38:35 +0200
 
