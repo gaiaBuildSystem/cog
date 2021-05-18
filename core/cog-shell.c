@@ -7,6 +7,16 @@
 
 #include "cog-shell.h"
 
+/**
+ * CogShell:
+ *
+ * A shell managed a [class@WebKit.WebView], the default URI that it will
+ * load, the view configuration, and keeps track of a number of registered
+ * [iface@Cog.RequestHandler] instances.
+ *
+ * Applications using a shell can handle the [signal@Cog.Shell::create-view]
+ * signal to customize the web view.
+ */
 
 typedef struct {
     char             *name;
@@ -14,6 +24,7 @@ typedef struct {
     WebKitWebContext *web_context;
     WebKitWebView    *web_view;
     GKeyFile         *config_file;
+    gdouble           device_scale_factor;
     GHashTable       *request_handlers;  /* (string, RequestHandlerMapEntry) */
 } CogShellPrivate;
 
@@ -30,6 +41,7 @@ enum {
     PROP_WEB_CONTEXT,
     PROP_WEB_VIEW,
     PROP_CONFIG_FILE,
+    PROP_DEVICE_SCALE_FACTOR,
     N_PROPERTIES,
 };
 
@@ -180,6 +192,9 @@ cog_shell_set_property (GObject      *object,
         case PROP_CONFIG_FILE:
             PRIV (shell)->config_file = g_value_get_boxed (value);
             break;
+        case PROP_DEVICE_SCALE_FACTOR:
+            PRIV (shell)->device_scale_factor = g_value_get_double (value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -240,6 +255,22 @@ cog_shell_class_init (CogShellClass *klass)
     klass->startup = cog_shell_startup_base;
     klass->shutdown = cog_shell_shutdown_base;
 
+    /**
+     * CogShell::create-view:
+     * @self: The shell to create the view for.
+     * @user_data: User data.
+     *
+     * The `create-view` signal is emitted when the shell needs to create
+     * a [class@WebKit.WebView].
+     *
+     * Handling this signal allows to customize how the web view is
+     * configured. Note that the web view returned by a signal handler
+     * **must** use the settings and context returned by
+     * [id@cog_shell_get_web_settings] and [id@cog_shell_get_web_context].
+     *
+     * Returns: (transfer full) (nullable): A new web view that will be used
+     *   by the shell.
+     */
     s_signals[CREATE_VIEW] =
         g_signal_new ("create-view",
                       COG_TYPE_SHELL,
@@ -251,6 +282,15 @@ cog_shell_class_init (CogShellClass *klass)
                       WEBKIT_TYPE_WEB_VIEW,
                       0);
 
+    /**
+     * CogShell:name: (attributes org.gtk.Property.get=cog_shell_get_name):
+     *
+     * Name of the shell.
+     *
+     * The shell name is used to determine the paths inside the XDG user
+     * directories where application-specific files (caches, website data,
+     * etc.) will be stored.
+     */
     s_properties[PROP_NAME] =
         g_param_spec_string ("name",
                              "Name",
@@ -260,6 +300,11 @@ cog_shell_class_init (CogShellClass *klass)
                              G_PARAM_CONSTRUCT_ONLY |
                              G_PARAM_STATIC_STRINGS);
 
+    /**
+     * CogShell:web-settings: (attributes org.gtk.Property.get=cog_shell_get_web_settings):
+     *
+     * WebKit settings for this shell.
+     */
     s_properties[PROP_WEB_SETTINGS] =
         g_param_spec_object ("web-settings",
                              "Web Settings",
@@ -268,6 +313,11 @@ cog_shell_class_init (CogShellClass *klass)
                              G_PARAM_READABLE |
                              G_PARAM_STATIC_STRINGS);
 
+    /**
+     * CogShell:web-context: (attributes org.gtk.Property.get=cog_shell_get_web_context):
+     *
+     * The [class@WebKit.WebContext] for this shell's view.
+     */
     s_properties[PROP_WEB_CONTEXT] =
         g_param_spec_object ("web-context",
                              "Web Contxt",
@@ -276,6 +326,11 @@ cog_shell_class_init (CogShellClass *klass)
                              G_PARAM_READABLE |
                              G_PARAM_STATIC_STRINGS);
 
+    /**
+     * CogShell:web-view: (attributes org.gtk.Property.get=cog_shell_get_web_view):
+     *
+     * The [class@WebKit.WebView] managed by this shell.
+     */
     s_properties[PROP_WEB_VIEW] =
         g_param_spec_object ("web-view",
                              "Web View",
@@ -292,6 +347,13 @@ cog_shell_class_init (CogShellClass *klass)
                             G_PARAM_READWRITE |
                             G_PARAM_STATIC_STRINGS);
 
+    s_properties[PROP_DEVICE_SCALE_FACTOR] =
+        g_param_spec_double ("device-scale-factor",
+                             "Device Scale Factor",
+                             "Device scale factor used for this shell",
+                             0, 64.0, 1.0,
+                             G_PARAM_READWRITE);
+
     g_object_class_install_properties (object_class, N_PROPERTIES, s_properties);
 }
 
@@ -304,7 +366,14 @@ cog_shell_init (CogShell *shell G_GNUC_UNUSED)
         priv->name = g_strdup (g_get_prgname ());
 }
 
-
+/**
+ * cog_shell_new: (constructor)
+ * @name: Name of the shell.
+ *
+ * Creates a new shell.
+ *
+ * Returns: (transfer full): A new shell instance.
+ */
 CogShell*
 cog_shell_new (const char *name)
 {
@@ -313,7 +382,13 @@ cog_shell_new (const char *name)
                          NULL);
 }
 
-
+/**
+ * cog_shell_get_web_context:
+ *
+ * Obtains the [class@WebKit.WebContext] for this shell.
+ *
+ * Returns: A web context.
+ */
 WebKitWebContext*
 cog_shell_get_web_context (CogShell *shell)
 {
@@ -321,7 +396,13 @@ cog_shell_get_web_context (CogShell *shell)
     return PRIV (shell)->web_context;
 }
 
-
+/**
+ * cog_shell_get_web_settings:
+ *
+ * Obtains the [class@WebKit.Settings] for this shell.
+ *
+ * Returns: A settings object.
+ */
 WebKitSettings*
 cog_shell_get_web_settings (CogShell *shell)
 {
@@ -329,7 +410,13 @@ cog_shell_get_web_settings (CogShell *shell)
     return PRIV (shell)->web_settings;
 }
 
-
+/**
+ * cog_shell_get_web_view:
+ *
+ * Obtains the [class@WebKit.WebView] for this shell.
+ *
+ * Returns: A web view.
+ */
 WebKitWebView*
 cog_shell_get_web_view (CogShell *shell)
 {
@@ -337,7 +424,13 @@ cog_shell_get_web_view (CogShell *shell)
     return PRIV (shell)->web_view;
 }
 
-
+/**
+ * cog_shell_get_name:
+ *
+ * Obtains the name of this shell.
+ *
+ * Returns: Shell name.
+ */
 const char*
 cog_shell_get_name (CogShell *shell)
 {
@@ -354,6 +447,20 @@ cog_shell_get_config_file (CogShell *shell)
 }
 
 
+gdouble
+cog_shell_get_device_scale_factor (CogShell *shell)
+{
+    g_return_val_if_fail (COG_IS_SHELL (shell), 0);
+    return PRIV(shell)->device_scale_factor;
+}
+
+/**
+ * cog_shell_set_request_handler:
+ * @scheme: Name of the custom URI scheme.
+ * @handler: Handler for the custom URI scheme.
+ *
+ * Installs a handler for a custom URI scheme.
+ */
 void
 cog_shell_set_request_handler (CogShell          *shell,
                                const char        *scheme,
@@ -387,7 +494,17 @@ cog_shell_set_request_handler (CogShell          *shell,
     request_handler_map_entry_register (scheme, entry, priv->web_context);
 }
 
-
+/**
+ * cog_shell_startup: (virtual startup)
+ *
+ * Finish initializing the shell.
+ *
+ * This takes care of registering custom URI scheme handlers and emitting
+ * [signal@Cog.Shell::create-view].
+ *
+ * Subclasses which override this method **must** invoke the base
+ * implementation.
+ */
 void
 cog_shell_startup  (CogShell *shell)
 {
@@ -396,6 +513,11 @@ cog_shell_startup  (CogShell *shell)
     (*klass->startup) (shell);
 }
 
+/**
+ * cog_shell_shutdown: (virtual shutdown)
+ *
+ * Deinitialize the shell.
+ */
 void
 cog_shell_shutdown (CogShell *shell)
 {

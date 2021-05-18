@@ -1,34 +1,48 @@
-=========================
-0.8.1 - February 22, 2021
-=========================
+=====================
+0.10.0 - May 18, 2021
+=====================
 
-- core: Improved cog_web_view_connect_default_error_handlers() to avoid
-  accidentally overriding already connected signal handlers.
-- drm: Fixed keyboard input when using modifier keys (e.g. Shift).
-- drm: Fixed crashes during deinitialization.
-- drm, fdo: Improved reliability for drivers which do not expose all their
-  functionality via eglGetProcAddress().
-- Improved behaviour of the CMake build system at configuration time.
+- Fix the location where the D-Bus policy config gets installed.
 
-==========================
-0.8.0 - September 12, 2020
-==========================
+======================
+0.9.90 - April 1, 2021
+======================
 
-- This release does not contain changes over the 0.7.90 development release.
+- Support building documentation for the Cog core library using gi-docgen.
+- gtk4: Added mew "gtk4" platform module, which works on Wayland and uses
+  GTK4 to render web content into a GtkGLArea and provides a minimal yet
+  usable user interface
 
-==========================
-0.7.90 - September 4, 2020
-==========================
+======================
+0.9.1 - March 16, 2021
+======================
 
-- cog: Added the --ignore-tls-errors command line option which allows ignoring
-  TLS certificate validation errors.
-- cog: Fixed navigation in some sites by following URI passed to window.open()
-  loading them in the active view.
-- fdo: Improve the logic to set the opaque region of the Wayland surface if it
-  could have changed between exported frames, which saves some CPU time.
-- drm: Support choosing the video mode to use using the
-  COG_PLATFORM_DRM_VIDEO_MODE environment variable.
-
+- core: Added CogPrefixRoutesHandler, which can route URI scheme requests
+  with different path prefixes to other handlers.
+- core: Added new CogShell.device-scale-factor property.
+- core: Added support in CogDirectoryFilesHandler to use the URI host part
+  as a path component, to ignore a certain amount of path components, and
+  expose the base path as a property.
+- core: Removed support for building using WebKitGTK, only the WPE port is
+  supported now.
+- drm: The DRM/KMS platform module is now built by default.
+- drm: Added support for key press event repeat.
+- drm: Added support for mouse cursor.
+- drm: Added support for atomic modesetting, which is automatically used
+  by default when support is detected in the video driver.
+- drm: Added support for limiting the maximum used video mode width and
+  height, settable using the COG_PLATFORM_DRM_MODE_MAX environment variable.
+- drm: Fixed usage of the specified output device scaling factor.
+- drm: Improve logging output.
+- drm, fdo: Added support for SHM buffer exports, which for example allows
+  using Mesa's software rasterization.
+- fdo: Try using the largest available output video mode when using the
+  zwp_fullscreen_shell_v1 protocol.
+- headless: Added new "headless" platform module, which does not produce
+  output and can be used without any graphics hardware e.g. in combination
+  with Mesa's software rasterization.
+- x11: Added new "x11" platform module, which uses an X11 window to paint
+  rendered web content using XCB and OpenGL.
 
 ======================
 0.7.1 - April 11, 2020
