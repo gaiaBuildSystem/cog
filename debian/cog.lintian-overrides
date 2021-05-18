@@ -1,2 +1,3 @@
-cog: sharedobject-in-library-directory-missing-soname usr/lib/*/libcogplatform-fdo.so
+cog: library-not-linked-against-libc usr/lib/*/libcogplatform-headless.so
+cog: sharedobject-in-library-directory-missing-soname usr/lib/*/libcogplatform-*.so
 cog: package-name-doesnt-match-sonames libcogcore1

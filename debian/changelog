@@ -6,6 +6,11 @@ cog (0.10.0-1) UNRELEASED; urgency=medium
   * debian/install:
     - Install all platform plugins (this version builds two new ones: drm
       and headless).
+  * debian/cog.lintian-overrides:
+    - Override sharedobject-in-library-directory-missing-soname in all
+      plugins
+    - Override library-not-linked-against-libc in the headless plugin
+      (this is a false positive, this plugin does not use libc symbols)
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 18 May 2021 17:38:35 +0200
 
