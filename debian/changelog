@@ -1,4 +1,4 @@
-cog (0.10.0-1) UNRELEASED; urgency=medium
+cog (0.10.0-1) experimental; urgency=medium
 
   * New upstream release.
   * debian/control:
@@ -13,7 +13,7 @@ cog (0.10.0-1) UNRELEASED; urgency=medium
       (this is a false positive, this plugin does not use libc symbols)
   * Drop use-fdo-backend.patch.
 
- -- Alberto Garcia <berto@igalia.com>  Tue, 18 May 2021 17:38:35 +0200
+ -- Alberto Garcia <berto@igalia.com>  Tue, 18 May 2021 23:25:25 +0200
 
 cog (0.8.1-1) unstable; urgency=medium
 
