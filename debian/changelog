@@ -11,6 +11,7 @@ cog (0.10.0-1) UNRELEASED; urgency=medium
       plugins
     - Override library-not-linked-against-libc in the headless plugin
       (this is a false positive, this plugin does not use libc symbols)
+  * Drop use-fdo-backend.patch.
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 18 May 2021 17:38:35 +0200
 
