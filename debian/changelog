@@ -1,3 +1,11 @@
+cog (0.10.0-2) UNRELEASED; urgency=medium
+
+  * debian/control:
+    - Build with libwpebackend-fdo-1.0-dev 1.10.0. This enables SHM buffer
+      exports.
+
+ -- Alberto Garcia <berto@igalia.com>  Tue, 15 Jun 2021 18:54:15 +0200
+
 cog (0.10.0-1) experimental; urgency=medium
 
   * New upstream release.
