@@ -3,7 +3,7 @@ cmake_minimum_required (VERSION 3.3)
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
 
-set_project_version(0 10 0)
+set_project_version(0 10 1)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -12,7 +12,7 @@ set_project_version(0 10 0)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 5 2 4)
+calculate_library_versions_from_libtool_triple(COGCORE 5 3 4)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
 include(DistTargets)
@@ -54,6 +54,7 @@ option(COG_DBUS_SYSTEM_BUS "Expose remote control interface on system bus" OFF)
 set(COG_DBUS_OWN_USER "" CACHE STRING
     "Additional user allowed to own the well-known name on the system bus")
 
+option(COG_PLATFORM_HEADLESS "Build the headless platform module" ON)
 option(COG_PLATFORM_FDO "Build the FDO platform module" ON)
 option(COG_PLATFORM_DRM "Build the DRM platform module" ON)
 option(COG_PLATFORM_X11 "Build the X11 platform module" OFF)
@@ -215,7 +216,9 @@ if (BUILD_DOCS)
     add_subdirectory(docs)
 endif ()
 
-add_subdirectory(platform/headless)
+if (COG_PLATFORM_HEADLESS)
+    add_subdirectory(platform/headless)
+endif ()
 if (COG_PLATFORM_FDO)
     add_subdirectory(platform/fdo)
 endif ()
