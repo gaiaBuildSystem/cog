@@ -17,10 +17,31 @@
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
 
+#if defined(WPE_FDO_CHECK_VERSION)
+#    define HAVE_FULLSCREEN_HANDLING WPE_FDO_CHECK_VERSION(1, 11, 1)
+#else
+#    define HAVE_FULLSCREEN_HANDLING 0
+#endif
+
+struct _CogGtk4PlatformClass {
+    CogPlatformClass parent_class;
+};
+
+struct _CogGtk4Platform {
+    CogPlatform parent;
+};
+
+G_DECLARE_FINAL_TYPE(CogGtk4Platform, cog_gtk4_platform, COG, GTK4_PLATFORM, CogPlatform)
+
+G_DEFINE_DYNAMIC_TYPE_EXTENDED(
+    CogGtk4Platform,
+    cog_gtk4_platform,
+    COG_TYPE_PLATFORM,
+    0,
+    g_io_extension_point_implement(COG_MODULES_PLATFORM_EXTENSION_POINT, g_define_type_id, "gtk4", 400);)
+
 /*
  * TODO
- * - fullscreen: if a video element switches to fullscreen it would be nice to also fullscreen the
-     GTK window. https://github.com/Igalia/cog/issues/287
  * - multi-views
  */
 
@@ -42,6 +63,11 @@ struct platform_window {
 
     int width;
     int height;
+#if HAVE_FULLSCREEN_HANDLING
+    bool is_fullscreen;
+    bool waiting_fullscreen_notify;
+#endif
+    double device_scale_factor;
 
     GdkModifierType key_modifiers;
 
@@ -53,7 +79,9 @@ struct platform_window {
 };
 
 static struct platform_window win = {
-    .gtk_window = NULL, .width = DEFAULT_WIDTH, .height = DEFAULT_HEIGHT, .settings_dialog = NULL
+    .width = DEFAULT_WIDTH,
+    .height = DEFAULT_HEIGHT,
+    .device_scale_factor = 1,
 };
 
 static const char s_vertex_shader[] = "#version 330\n"
@@ -150,8 +178,11 @@ setup_shader(struct platform_window* window, GError** error)
     g_debug("GLSL version: %s", glGetString(GL_SHADING_LANGUAGE_VERSION));
 
     /* if the GtkGLArea is in an error state we don't do anything */
-    if (gtk_gl_area_get_error(GTK_GL_AREA(window->gl_drawing_area)) != NULL)
+    if (gtk_gl_area_get_error(GTK_GL_AREA(window->gl_drawing_area)) != NULL) {
+        if (error)
+            *error = g_error_copy(gtk_gl_area_get_error(GTK_GL_AREA(window->gl_drawing_area)));
         return false;
+    }
 
     if (!(window->ext_glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)load_egl_proc_address(
               "glEGLImageTargetTexture2DOES"))) {
@@ -302,6 +333,32 @@ resize(GtkGLArea* area, int width, int height, gpointer user_data)
         wpe_view_backend_exportable_fdo_get_view_backend(win->exportable),
         win->width, win->height);
 }
+
+#if HAVE_FULLSCREEN_HANDLING
+static void
+dispatch_wpe_fullscreen_event(struct platform_window* win)
+{
+    struct wpe_view_backend* backend = webkit_web_view_backend_get_wpe_backend(win->view_backend);
+    if (win->is_fullscreen)
+        wpe_view_backend_dispatch_did_enter_fullscreen(backend);
+    else
+        wpe_view_backend_dispatch_did_exit_fullscreen(backend);
+}
+
+static void
+on_fullscreen_change(GtkWidget* window, GParamSpec* pspec, gpointer user_data)
+{
+    struct platform_window* win = user_data;
+    bool was_fullscreen_requested_from_dom = win->waiting_fullscreen_notify;
+    win->waiting_fullscreen_notify = false;
+    win->is_fullscreen = gtk_window_is_fullscreen(GTK_WINDOW(window));
+
+    if (!win->is_fullscreen && !was_fullscreen_requested_from_dom)
+        wpe_view_backend_dispatch_request_exit_fullscreen(webkit_web_view_backend_get_wpe_backend(win->view_backend));
+    else if (was_fullscreen_requested_from_dom)
+        dispatch_wpe_fullscreen_event(win);
+}
+#endif
 
 static void
 on_quit(GtkWidget* widget, gpointer data)
@@ -490,6 +547,29 @@ action_activate_entry(GtkWidget* widget, GVariant* args,
     return TRUE;
 }
 
+#if HAVE_FULLSCREEN_HANDLING
+static bool
+on_dom_fullscreen_request(void* unused, bool fullscreen)
+{
+    if (win.waiting_fullscreen_notify)
+        return false;
+
+    if (fullscreen == win.is_fullscreen) {
+        // Handle situations where DOM fullscreen requests are mixed with system fullscreen commands (e.g F11)
+        dispatch_wpe_fullscreen_event(&win);
+        return true;
+    }
+
+    win.waiting_fullscreen_notify = true;
+    if (fullscreen)
+        gtk_window_fullscreen(GTK_WINDOW(win.gtk_window));
+    else
+        gtk_window_unfullscreen(GTK_WINDOW(win.gtk_window));
+
+    return true;
+}
+#endif
+
 static gboolean
 action_open_settings(GtkWidget* widget, GVariant* args,
     gpointer user_data)
@@ -583,6 +663,10 @@ setup_window(struct platform_window* window)
     g_signal_connect(window->gl_drawing_area, "render", G_CALLBACK(render), window);
     g_signal_connect(window->gl_drawing_area, "resize", G_CALLBACK(resize), window);
 
+#if HAVE_FULLSCREEN_HANDLING
+    g_signal_connect(window->gtk_window, "notify::fullscreened", G_CALLBACK(on_fullscreen_change), window);
+#endif
+
     GtkGesture* press = gtk_gesture_click_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(press), GDK_BUTTON_PRIMARY);
     g_signal_connect(press, "pressed", G_CALLBACK(on_click_pressed), window);
@@ -663,10 +747,8 @@ setup_fdo_exportable(struct platform_window* window)
     g_assert_nonnull(window->view_backend);
 }
 
-gboolean
-cog_platform_plugin_setup(CogPlatform* platform,
-    CogShell* shell G_GNUC_UNUSED,
-    const char* params, GError** error)
+static gboolean
+cog_gtk4_platform_setup(CogPlatform* platform, CogShell* shell, const char* params, GError** error)
 {
     g_assert_nonnull(platform);
 
@@ -679,18 +761,19 @@ cog_platform_plugin_setup(CogPlatform* platform,
 
     setup_window(&win);
     setup_fdo_exportable(&win);
+
+    win.device_scale_factor = cog_shell_get_device_scale_factor(shell);
+
+#if HAVE_FULLSCREEN_HANDLING
+    wpe_view_backend_set_fullscreen_handler(webkit_web_view_backend_get_wpe_backend(win.view_backend),
+                                            on_dom_fullscreen_request, NULL);
+#endif
+
     return TRUE;
 }
 
-void
-cog_platform_plugin_teardown(CogPlatform* platform)
-{
-    g_assert_nonnull(platform);
-}
-
-WebKitWebViewBackend*
-cog_platform_plugin_get_view_backend(
-    CogPlatform* platform, WebKitWebView* related_view, GError** error)
+static WebKitWebViewBackend*
+cog_gtk4_platform_get_view_backend(CogPlatform* platform, WebKitWebView* related_view, GError** error)
 {
     g_assert_nonnull(platform);
     g_assert_nonnull(win.view_backend);
@@ -741,9 +824,8 @@ on_back_forward_changed(WebKitBackForwardList* back_forward_list,
         webkit_web_view_can_go_forward(win->web_view));
 }
 
-void
-cog_platform_plugin_init_web_view(CogPlatform* platform,
-    WebKitWebView* view)
+static void
+cog_gtk4_platform_init_web_view(CogPlatform* platform, WebKitWebView* view)
 {
     g_signal_connect(view, "notify::title", G_CALLBACK(on_title_change), &win);
     g_signal_connect(view, "notify::uri", G_CALLBACK(on_uri_change), &win);
@@ -752,4 +834,53 @@ cog_platform_plugin_init_web_view(CogPlatform* platform,
     g_signal_connect(webkit_web_view_get_back_forward_list(view), "changed",
         G_CALLBACK(on_back_forward_changed), &win);
     win.web_view = view;
+
+    wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_backend_exportable_fdo_get_view_backend(win.exportable),
+                                                      win.device_scale_factor);
+}
+
+static void*
+check_supported(void* data G_GNUC_UNUSED)
+{
+    return GINT_TO_POINTER(gtk_init_check());
+}
+
+static gboolean
+cog_gtk4_platform_is_supported(void)
+{
+    static GOnce once = G_ONCE_INIT;
+    g_once(&once, check_supported, NULL);
+    return GPOINTER_TO_INT(once.retval);
+}
+
+static void
+cog_gtk4_platform_class_init(CogGtk4PlatformClass* klass)
+{
+    CogPlatformClass* platform_class = COG_PLATFORM_CLASS(klass);
+    platform_class->is_supported = cog_gtk4_platform_is_supported;
+    platform_class->setup = cog_gtk4_platform_setup;
+    platform_class->get_view_backend = cog_gtk4_platform_get_view_backend;
+    platform_class->init_web_view = cog_gtk4_platform_init_web_view;
+}
+
+static void
+cog_gtk4_platform_class_finalize(CogGtk4PlatformClass* klass)
+{
+}
+
+static void
+cog_gtk4_platform_init(CogGtk4Platform* self)
+{
+}
+
+G_MODULE_EXPORT void
+g_io_cogplatform_gtk4_load(GIOModule* module)
+{
+    GTypeModule* type_module = G_TYPE_MODULE(module);
+    cog_gtk4_platform_register_type(type_module);
+}
+
+G_MODULE_EXPORT void
+g_io_cogplatform_gtk4_unload(GIOModule* module G_GNUC_UNUSED)
+{
 }

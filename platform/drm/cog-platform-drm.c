@@ -21,6 +21,11 @@
 
 #include "../common/egl-proc-address.h"
 
+#ifndef LIBINPUT_CHECK_VERSION
+#    define LIBINPUT_CHECK_VERSION(a, b, c)                                                         \
+        ((LIBINPUT_VER_MAJOR > (a)) || (LIBINPUT_VER_MAJOR == (a) && (LIBINPUT_VER_MINOR > (b))) || \
+         (LIBINPUT_VER_MAJOR == (a) && (LIBINPUT_VER_MINOR == (b)) && (LIBINPUT_VER_MICRO >= (c))))
+#endif /* !LIBINPUT_CHECK_VERSION */
 
 #if !defined(EGL_EXT_platform_base)
 typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platform, void *native_display, const EGLint *attrib_list);
@@ -28,12 +33,6 @@ typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platf
 
 #if !defined(EGL_MESA_platform_gbm) || !defined(EGL_KHR_platform_gbm)
 #define EGL_PLATFORM_GBM_KHR 0x31D7
-#endif
-
-#if defined(WPE_CHECK_VERSION)
-# define HAVE_DEVICE_SCALING WPE_CHECK_VERSION(1, 3, 0)
-#else
-# define HAVE_DEVICE_SCALING 0
 #endif
 
 #if defined(WPE_FDO_CHECK_VERSION)
@@ -44,6 +43,34 @@ typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platf
 
 #define KEY_STARTUP_DELAY 500000
 #define KEY_REPEAT_DELAY 100000
+
+#ifndef g_debug_once
+#    define g_debug_once(...)                                                                     \
+        G_STMT_START                                                                              \
+        {                                                                                         \
+            static int G_PASTE(_GDebugOnceBoolean_, __LINE__) = 0; /* (atomic) */                 \
+            if (g_atomic_int_compare_and_exchange(&G_PASTE(_GDebugOnceBoolean_, __LINE__), 0, 1)) \
+                g_debug(__VA_ARGS__);                                                             \
+        }                                                                                         \
+        G_STMT_END
+#endif /* !g_debug_once */
+
+struct _CogDrmPlatformClass {
+    CogPlatformClass parent_class;
+};
+
+struct _CogDrmPlatform {
+    CogPlatform parent;
+};
+
+G_DECLARE_FINAL_TYPE(CogDrmPlatform, cog_drm_platform, COG, DRM_PLATFORM, CogPlatform)
+
+G_DEFINE_DYNAMIC_TYPE_EXTENDED(
+    CogDrmPlatform,
+    cog_drm_platform,
+    COG_TYPE_PLATFORM,
+    0,
+    g_io_extension_point_implement(COG_MODULES_PLATFORM_EXTENSION_POINT, g_define_type_id, "drm", 200);)
 
 struct buffer_object {
     struct wl_list link;
@@ -317,12 +344,34 @@ clear_drm (void)
 }
 
 static gboolean
-init_drm (void)
+check_drm(void)
 {
     drmDevice *devices[64];
-    memset (devices, 0, sizeof (*devices) * 64);
+    memset(devices, 0, sizeof(*devices) * 64);
 
-    int num_devices = drmGetDevices2 (0, devices, 64);
+    int num_devices = drmGetDevices2(0, devices, 64);
+    if (num_devices < 0)
+        return FALSE;
+
+    gboolean supported = FALSE;
+    for (int i = 0; !supported && i < num_devices; ++i) {
+        if (devices[i]->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+            supported = TRUE;
+            break;
+        }
+    }
+
+    drmFreeDevices(devices, num_devices);
+    return supported;
+}
+
+static gboolean
+init_drm(void)
+{
+    drmDevice *devices[64];
+    memset(devices, 0, sizeof(*devices) * 64);
+
+    int num_devices = drmGetDevices2(0, devices, 64);
     if (num_devices < 0)
         return FALSE;
 
@@ -358,6 +407,8 @@ init_drm (void)
         close (drm_data.fd);
         drm_data.fd = -1;
     }
+
+    drmFreeDevices(devices, num_devices);
 
     if (!drm_data.base_resources)
         return FALSE;
@@ -1176,6 +1227,107 @@ input_handle_pointer_button_event (struct libinput_event_pointer *pointer_event)
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
 }
 
+#if LIBINPUT_CHECK_VERSION(1, 19, 0)
+static void
+input_handle_pointer_discrete_scroll_event(struct libinput_event_pointer *pointer_event)
+{
+    struct wpe_input_axis_2d_event event = {
+        .base.type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion,
+        .base.time = libinput_event_pointer_get_time(pointer_event),
+        .base.x = cursor.x,
+        .base.y = cursor.y,
+        .x_axis = 0.0,
+        .y_axis = 0.0,
+    };
+
+    if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL))
+        event.y_axis = -drm_data.device_scale * libinput_event_pointer_get_scroll_value_v120(
+                                                    pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+    if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
+        event.x_axis = drm_data.device_scale * libinput_event_pointer_get_scroll_value_v120(
+                                                   pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+
+    wpe_view_backend_dispatch_axis_event(wpe_view_data.backend, &event.base);
+}
+
+static void
+input_handle_pointer_smooth_scroll_event(struct libinput_event_pointer *pointer_event)
+{
+    struct wpe_input_axis_2d_event event = {
+        .base.type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth,
+        .base.time = libinput_event_pointer_get_time(pointer_event),
+        .base.x = cursor.x,
+        .base.y = cursor.y,
+        .x_axis = 0.0,
+        .y_axis = 0.0,
+    };
+
+    if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL))
+        event.y_axis = drm_data.device_scale *
+                       libinput_event_pointer_get_scroll_value(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+    if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
+        event.x_axis = drm_data.device_scale *
+                       libinput_event_pointer_get_scroll_value(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+
+    wpe_view_backend_dispatch_axis_event(wpe_view_data.backend, &event.base);
+}
+#else
+static void
+input_handle_pointer_axis_event(struct libinput_event_pointer *pointer_event)
+{
+    struct wpe_input_axis_2d_event event = {
+        .base.type = wpe_input_axis_event_type_mask_2d,
+        .base.time = libinput_event_pointer_get_time(pointer_event),
+        .base.x = cursor.x,
+        .base.y = cursor.y,
+        .x_axis = 0.0,
+        .y_axis = 0.0,
+    };
+
+    if (libinput_event_pointer_get_axis_source(pointer_event) == LIBINPUT_POINTER_AXIS_SOURCE_WHEEL) {
+        event.base.type |= wpe_input_axis_event_type_motion;
+        if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL))
+            event.y_axis = -120.0 * libinput_event_pointer_get_axis_value_discrete(
+                                        pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+        if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
+            event.x_axis = 120.0 * libinput_event_pointer_get_axis_value_discrete(
+                                       pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+    } else {
+        event.base.type |= wpe_input_axis_event_type_motion_smooth;
+        if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL))
+            event.y_axis = libinput_event_pointer_get_axis_value(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+        if (libinput_event_pointer_has_axis(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
+            event.x_axis =
+                libinput_event_pointer_get_axis_value(pointer_event, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
+    }
+
+    event.x_axis *= drm_data.device_scale;
+    event.y_axis *= drm_data.device_scale;
+
+    wpe_view_backend_dispatch_axis_event(wpe_view_data.backend, &event.base);
+}
+#endif /* !LIBINPUT_CHECK_VERSION(1, 19, 0) */
+
+static void
+input_handle_device_added(struct libinput_device *device)
+{
+    g_debug("Input device %p added: %s (%04x:%04x)",
+            device,
+            libinput_device_get_name(device),
+            libinput_device_get_id_vendor(device),
+            libinput_device_get_id_product(device));
+}
+
+static void
+input_handle_device_removed(struct libinput_device *device)
+{
+    g_debug("Input device %p removed: %s (%04x:%04x)",
+            device,
+            libinput_device_get_name(device),
+            libinput_device_get_id_vendor(device),
+            libinput_device_get_id_product(device));
+}
+
 static void
 input_process_events (void)
 {
@@ -1189,26 +1341,112 @@ input_process_events (void)
 
         enum libinput_event_type event_type = libinput_event_get_type (event);
         switch (event_type) {
-            case LIBINPUT_EVENT_KEYBOARD_KEY:
-                input_handle_key_event (libinput_event_get_keyboard_event (event));
-                break;
-            case LIBINPUT_EVENT_TOUCH_DOWN:
-            case LIBINPUT_EVENT_TOUCH_UP:
-            case LIBINPUT_EVENT_TOUCH_MOTION:
-            case LIBINPUT_EVENT_TOUCH_FRAME:
-                input_handle_touch_event(event_type, libinput_event_get_touch_event(event));
-                break;
-            case LIBINPUT_EVENT_POINTER_MOTION:
-                input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), false);
-                break;
-            case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
-                input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), true);
-                break;
-            case LIBINPUT_EVENT_POINTER_BUTTON:
-                input_handle_pointer_button_event(libinput_event_get_pointer_event(event));
-                break;
-            default:
-                break;
+        case LIBINPUT_EVENT_NONE:
+            return;
+
+        case LIBINPUT_EVENT_DEVICE_ADDED:
+            input_handle_device_added(libinput_event_get_device(event));
+            break;
+        case LIBINPUT_EVENT_DEVICE_REMOVED:
+            input_handle_device_removed(libinput_event_get_device(event));
+            break;
+
+        case LIBINPUT_EVENT_KEYBOARD_KEY:
+            input_handle_key_event(libinput_event_get_keyboard_event(event));
+            break;
+
+        case LIBINPUT_EVENT_TOUCH_CANCEL:
+            break;
+        case LIBINPUT_EVENT_TOUCH_DOWN:
+        case LIBINPUT_EVENT_TOUCH_UP:
+        case LIBINPUT_EVENT_TOUCH_MOTION:
+        case LIBINPUT_EVENT_TOUCH_FRAME:
+            input_handle_touch_event(event_type, libinput_event_get_touch_event(event));
+            break;
+
+        case LIBINPUT_EVENT_POINTER_MOTION:
+            input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), false);
+            break;
+        case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+            input_handle_pointer_motion_event(libinput_event_get_pointer_event(event), true);
+            break;
+
+        case LIBINPUT_EVENT_POINTER_BUTTON:
+            input_handle_pointer_button_event(libinput_event_get_pointer_event(event));
+            break;
+
+        case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
+        case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE:
+        case LIBINPUT_EVENT_GESTURE_SWIPE_END:
+            g_debug_once("%s: GESTURE_SWIPE_{BEGIN,UPDATE,END} unimplemented", __func__);
+            break;
+
+        case LIBINPUT_EVENT_GESTURE_PINCH_BEGIN:
+        case LIBINPUT_EVENT_GESTURE_PINCH_UPDATE:
+        case LIBINPUT_EVENT_GESTURE_PINCH_END:
+            g_debug_once("%s: GESTURE_PINCH_{BEGIN,UPDATE,END} unimplemented", __func__);
+            break;
+
+#if LIBINPUT_CHECK_VERSION(1, 2, 0)
+        case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
+            g_debug_once("%s: TABLET_TOOL_AXIS unimplemented", __func__);
+            break;
+        case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY:
+            g_debug_once("%s: TABLET_TOOL_PROXIMITY unimplemented", __func__);
+            break;
+        case LIBINPUT_EVENT_TABLET_TOOL_TIP:
+            g_debug_once("%s: TABLET_TOOL_TIP unimplemented", __func__);
+            break;
+        case LIBINPUT_EVENT_TABLET_TOOL_BUTTON:
+            g_debug_once("%s: TABLET_TOOL_BUTTON unimplemented", __func__);
+            break;
+#endif /* LIBINPUT_CHECK_VERSION(1, 2, 0) */
+
+#if LIBINPUT_CHECK_VERSION(1, 3, 0)
+        case LIBINPUT_EVENT_TABLET_PAD_BUTTON:
+            g_debug_once("%s: TABLET_PAD_BUTTON unimplemented", __func__);
+            break;
+        case LIBINPUT_EVENT_TABLET_PAD_RING:
+            g_debug_once("%s: TABLET_PAD_RING unimplemented", __func__);
+            break;
+        case LIBINPUT_EVENT_TABLET_PAD_STRIP:
+            g_debug_once("%s: TABLET_PAD_STRIP unimplemented", __func__);
+            break;
+#endif /* LIBINPUT_CHECK_VERSION(1, 3, 0) */
+
+#if LIBINPUT_CHECK_VERSION(1, 7, 0)
+        case LIBINPUT_EVENT_SWITCH_TOGGLE:
+            g_debug_once("%s: SWITCH_TOGGLE unimplemented", __func__);
+            break;
+#endif /* LIBINPUT_CHECK_VERSION(1, 7, 0) */
+
+#if LIBINPUT_CHECK_VERSION(1, 15, 0)
+        case LIBINPUT_EVENT_TABLET_PAD_KEY:
+            g_debug_once("%s: TABLET_PAD_KEY unimplemented", __func__);
+            break;
+#endif /* LIBINPUT_CHECK_VERSION(1, 15, 0) */
+
+#if LIBINPUT_CHECK_VERSION(1, 19, 0)
+        case LIBINPUT_EVENT_POINTER_AXIS:
+            /* Deprecated, use _SCROLL_{WHEEL,FINGER,CONTINUOUS} below. */
+            break;
+        case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
+            input_handle_pointer_discrete_scroll_event(libinput_event_get_pointer_event(event));
+            break;
+        case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
+        case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
+            input_handle_pointer_smooth_scroll_event(libinput_event_get_pointer_event(event));
+            break;
+
+        case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
+        case LIBINPUT_EVENT_GESTURE_HOLD_END:
+            g_debug_once("%s: GESTURE_HOLD_{BEGIN,END} unimplemented", __func__);
+            break;
+#else
+        case LIBINPUT_EVENT_POINTER_AXIS:
+            input_handle_pointer_axis_event(libinput_event_get_pointer_event(event));
+            break;
+#endif /* LIBINPUT_CHECK_VERSION(1, 19, 0) */
         }
 
         libinput_event_destroy (event);
@@ -1505,11 +1743,24 @@ on_export_shm_buffer (void* data, struct wpe_fdo_shm_exported_buffer *exported_b
 }
 #endif
 
-gboolean
-cog_platform_plugin_setup (CogPlatform *platform,
-                           CogShell    *shell,
-                           const char  *params,
-                           GError     **error)
+static void *
+check_supported(void *data G_GNUC_UNUSED)
+{
+    if (check_drm())
+        return GINT_TO_POINTER(TRUE);
+    return GINT_TO_POINTER(FALSE);
+}
+
+static gboolean
+cog_drm_platform_is_supported(void)
+{
+    static GOnce once = G_ONCE_INIT;
+    g_once(&once, check_supported, NULL);
+    return GPOINTER_TO_INT(once.retval);
+}
+
+static gboolean
+cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *params, GError **error)
 {
     g_assert (platform);
     g_return_val_if_fail (COG_IS_SHELL (shell), FALSE);
@@ -1575,25 +1826,22 @@ cog_platform_plugin_setup (CogPlatform *platform,
     return TRUE;
 }
 
-void
-cog_platform_plugin_teardown (CogPlatform *platform)
+static void
+cog_drm_platform_finalize(GObject *object)
 {
-    g_assert (platform);
-
     clear_buffers ();
-
     clear_glib ();
     clear_input ();
     clear_egl ();
     clear_gbm ();
     clear_cursor ();
     clear_drm ();
+
+    G_OBJECT_CLASS(cog_drm_platform_parent_class)->finalize(object);
 }
 
-WebKitWebViewBackend *
-cog_platform_plugin_get_view_backend (CogPlatform   *platform,
-                                      WebKitWebView *related_view,
-                                      GError       **error)
+static WebKitWebViewBackend *
+cog_drm_platform_get_view_backend(CogPlatform *platform, WebKitWebView *related_view, GError **error)
 {
     static struct wpe_view_backend_exportable_fdo_client exportable_client = {
         .export_buffer_resource = on_export_buffer_resource,
@@ -1621,12 +1869,44 @@ cog_platform_plugin_get_view_backend (CogPlatform   *platform,
     return wk_view_backend;
 }
 
-void
-cog_platform_plugin_init_web_view (CogPlatform   *platform,
-                                   WebKitWebView *view)
+static void
+cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
-#ifdef HAVE_DEVICE_SCALING
     wpe_view_backend_dispatch_set_device_scale_factor (wpe_view_data.backend,
                                                        drm_data.device_scale);
-#endif
+}
+
+static void
+cog_drm_platform_class_init(CogDrmPlatformClass *klass)
+{
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    object_class->finalize = cog_drm_platform_finalize;
+
+    CogPlatformClass *platform_class = COG_PLATFORM_CLASS(klass);
+    platform_class->is_supported = cog_drm_platform_is_supported;
+    platform_class->setup = cog_drm_platform_setup;
+    platform_class->get_view_backend = cog_drm_platform_get_view_backend;
+    platform_class->init_web_view = cog_drm_platform_init_web_view;
+}
+
+static void
+cog_drm_platform_class_finalize(CogDrmPlatformClass *klass)
+{
+}
+
+static void
+cog_drm_platform_init(CogDrmPlatform *self)
+{
+}
+
+G_MODULE_EXPORT void
+g_io_cogplatform_drm_load(GIOModule *module)
+{
+    GTypeModule *type_module = G_TYPE_MODULE(module);
+    cog_drm_platform_register_type(type_module);
+}
+
+G_MODULE_EXPORT void
+g_io_cogplatform_drm_unload(GIOModule *module G_GNUC_UNUSED)
+{
 }

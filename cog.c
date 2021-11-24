@@ -12,12 +12,6 @@
 #include <string.h>
 #include "core/cog.h"
 
-#if defined(WPE_CHECK_VERSION) && WPE_CHECK_VERSION(1, 3, 0)
-# define HAVE_DEVICE_SCALING 1
-#else
-# define HAVE_DEVICE_SCALING 0
-#endif /* WPE_CHECK_VERSION */
-
 enum webprocess_fail_action {
     WEBPROCESS_FAIL_UNKNOWN = 0,
     WEBPROCESS_FAIL_ERROR_PAGE,
@@ -34,9 +28,7 @@ static struct {
     gboolean print_appid;
     gboolean doc_viewer;
     gdouble  scale_factor;
-#if HAVE_DEVICE_SCALING
     gdouble  device_scale_factor;
-#endif // HAVE_DEVICE_SCALING
     GStrv    dir_handlers;
     GStrv    arguments;
     char    *background_color;
@@ -45,66 +37,54 @@ static struct {
         CogPlatform *platform;
     };
     union {
+        char *filter_path;
+        WebKitUserContentFilter *filter;
+    };
+    union {
         char *action_name;
         enum webprocess_fail_action action_id;
     } on_failure;
     char *web_extensions_dir;
     gboolean ignore_tls_errors;
+    gboolean enable_sandbox;
+    gboolean automation;
 } s_options = {
     .scale_factor = 1.0,
-#if HAVE_DEVICE_SCALING
     .device_scale_factor = 1.0,
-#endif // HAVE_DEVICE_SCALING
 };
 
-
-static GOptionEntry s_cli_options[] =
-{
-    { "version", '\0', 0, G_OPTION_ARG_NONE, &s_options.version,
-        "Print version and exit",
-        NULL },
-    { "print-appid", '\0', 0, G_OPTION_ARG_NONE, &s_options.print_appid,
-        "Print application ID and exit",
-        NULL },
-    { "scale", '\0', 0, G_OPTION_ARG_DOUBLE, &s_options.scale_factor,
-        "Zoom/Scaling factor applied to Web content (default: 1.0, no scaling)",
-        "FACTOR" },
-#if HAVE_DEVICE_SCALING
-    { "device-scale", '\0', 0, G_OPTION_ARG_DOUBLE, &s_options.device_scale_factor,
-        "Output device scaling factor (default: 1.0, no scaling, 96 DPI)",
-        "FACTOR" },
-#endif // HAVE_DEVICE_SCALING
-    { "doc-viewer", '\0', 0, G_OPTION_ARG_NONE, &s_options.doc_viewer,
-        "Document viewer mode: optimizes for local loading of Web content. "
-        "This reduces memory usage at the cost of reducing caching of "
-        "resources loaded from the network.",
-        NULL },
-    { "dir-handler", 'd', 0, G_OPTION_ARG_STRING_ARRAY, &s_options.dir_handlers,
-        "Add a URI scheme handler for a directory",
-        "SCHEME:PATH" },
-    { "webprocess-failure", '\0', 0, G_OPTION_ARG_STRING,
-        &s_options.on_failure.action_name,
-        "Action on WebProcess failures: error-page (default), exit, exit-ok, restart.",
-        "ACTION" },
-    { "config", 'C', 0, G_OPTION_ARG_FILENAME, &s_options.config_file,
-        "Path to a configuration file",
-        "PATH" },
-    { "bg-color", 'b', 0, G_OPTION_ARG_STRING, &s_options.background_color,
-        "Background color, as a CSS name or in #RRGGBBAA hex syntax (default: white)",
-        "BG_COLOR" },
-    { "platform", 'P', 0, G_OPTION_ARG_STRING, &s_options.platform_name,
-        "Platform plug-in to use.",
-        "NAME" },
-    { "web-extensions-dir", '\0', 0, G_OPTION_ARG_STRING, &s_options.web_extensions_dir,
-      "Load Web Extensions from given directory.",
-      "PATH"},
-    { "ignore-tls-errors", '\0', 0, G_OPTION_ARG_NONE, &s_options.ignore_tls_errors,
-        "Ignore TLS errors (default: disabled).", NULL },
-    { G_OPTION_REMAINING, '\0', 0, G_OPTION_ARG_FILENAME_ARRAY, &s_options.arguments,
-        "", "[URL]" },
-    { NULL }
-};
-
+static GOptionEntry s_cli_options[] = {
+    {"version", '\0', 0, G_OPTION_ARG_NONE, &s_options.version, "Print version and exit", NULL},
+    {"print-appid", '\0', 0, G_OPTION_ARG_NONE, &s_options.print_appid, "Print application ID and exit", NULL},
+    {"scale", '\0', 0, G_OPTION_ARG_DOUBLE, &s_options.scale_factor,
+     "Zoom/Scaling factor applied to Web content (default: 1.0, no scaling)", "FACTOR"},
+    {"device-scale", '\0', 0, G_OPTION_ARG_DOUBLE, &s_options.device_scale_factor,
+     "Output device scaling factor (default: 1.0, no scaling, 96 DPI)", "FACTOR"},
+    {"doc-viewer", '\0', 0, G_OPTION_ARG_NONE, &s_options.doc_viewer,
+     "Document viewer mode: optimizes for local loading of Web content. "
+     "This reduces memory usage at the cost of reducing caching of "
+     "resources loaded from the network.",
+     NULL},
+    {"dir-handler", 'd', 0, G_OPTION_ARG_STRING_ARRAY, &s_options.dir_handlers,
+     "Add a URI scheme handler for a directory", "SCHEME:PATH"},
+    {"webprocess-failure", '\0', 0, G_OPTION_ARG_STRING, &s_options.on_failure.action_name,
+     "Action on WebProcess failures: error-page (default), exit, exit-ok, restart.", "ACTION"},
+    {"config", 'C', 0, G_OPTION_ARG_FILENAME, &s_options.config_file, "Path to a configuration file", "PATH"},
+    {"bg-color", 'b', 0, G_OPTION_ARG_STRING, &s_options.background_color,
+     "Background color, as a CSS name or in #RRGGBBAA hex syntax (default: white)", "BG_COLOR"},
+    {"platform", 'P', 0, G_OPTION_ARG_STRING, &s_options.platform_name, "Platform plug-in to use.", "NAME"},
+    {"web-extensions-dir", '\0', 0, G_OPTION_ARG_STRING, &s_options.web_extensions_dir,
+     "Load Web Extensions from given directory.", "PATH"},
+    {"ignore-tls-errors", '\0', 0, G_OPTION_ARG_NONE, &s_options.ignore_tls_errors,
+     "Ignore TLS errors (default: disabled).", NULL},
+    {"content-filter", 'F', 0, G_OPTION_ARG_FILENAME, &s_options.filter_path,
+     "Path to content filter JSON rule set (default: none).", "PATH"},
+    {"enable-sandbox", 's', 0, G_OPTION_ARG_NONE, &s_options.enable_sandbox,
+     "Enable WebProcess sandbox (default: disabled).", NULL},
+    {"automation", '\0', 0, G_OPTION_ARG_NONE, &s_options.automation, "Enable automation mode (default: disabled).",
+     NULL},
+    {G_OPTION_REMAINING, '\0', 0, G_OPTION_ARG_FILENAME_ARRAY, &s_options.arguments, "", "[URL]"},
+    {NULL}};
 
 static gboolean
 load_settings (CogShell *shell, GKeyFile *key_file, GError **error)
@@ -146,6 +126,15 @@ string_to_webprocess_fail_action (const char *action)
     return WEBPROCESS_FAIL_UNKNOWN;
 }
 
+static void
+on_filter_saved(WebKitUserContentFilterStore *store, GAsyncResult *result, GMainLoop *loop)
+{
+    g_autoptr(GError) error = NULL;
+    s_options.filter = webkit_user_content_filter_store_save_from_file_finish(store, result, &error);
+    if (!s_options.filter)
+        g_warning("Cannot compile filter: %s", error->message);
+    g_main_loop_quit(loop);
+}
 
 static int
 on_handle_local_options (GApplication *application,
@@ -179,8 +168,11 @@ on_handle_local_options (GApplication *application,
     }
 
     const char *uri = NULL;
-    if (!s_options.arguments) {
-        if (!(uri = g_getenv ("COG_URL"))) {
+    g_autoptr(CogShell) shell = cog_launcher_get_shell(COG_LAUNCHER(application));
+    if (cog_shell_is_automated(shell)) {
+        uri = "about:blank";
+    } else if (!s_options.arguments) {
+        if (!(uri = g_getenv("COG_URL"))) {
 #ifdef COG_DEFAULT_HOME_URI
             uri = COG_DEFAULT_HOME_URI;
 #else
@@ -188,7 +180,7 @@ on_handle_local_options (GApplication *application,
             return EXIT_FAILURE;
 #endif // COG_DEFAULT_HOME_URI
         }
-    } else if (g_strv_length (s_options.arguments) > 1) {
+    } else if (g_strv_length(s_options.arguments) > 1) {
         g_printerr ("%s: Cannot load more than one URL.\n", g_get_prgname ());
         return EXIT_FAILURE;
     } else {
@@ -210,7 +202,6 @@ on_handle_local_options (GApplication *application,
      * whether the directory exists. Note that this creation of the
      * corresponding CogURIHandler objects is done at GApplication::startup.
      */
-    g_autoptr(CogShell) shell = cog_launcher_get_shell (COG_LAUNCHER (application));
     for (size_t i = 0; s_options.dir_handlers && s_options.dir_handlers[i]; i++) {
         char *colon = strchr (s_options.dir_handlers[i], ':');
         if (!colon) {
@@ -270,20 +261,46 @@ on_handle_local_options (GApplication *application,
             return EXIT_FAILURE;
         }
 
-        g_object_set (shell, "config-file", g_key_file_ref (key_file), NULL);
+        g_object_set(shell, "config-file", g_key_file_ref(key_file), NULL);
     }
 
-    g_object_set (shell, "device-scale-factor", s_options.device_scale_factor, NULL);
+    g_object_set(shell, "device-scale-factor", s_options.device_scale_factor, NULL);
 
     if (s_options.web_extensions_dir != NULL) {
-        webkit_web_context_set_web_extensions_directory (cog_shell_get_web_context (shell),
-                                                         s_options.web_extensions_dir);
+        webkit_web_context_set_web_extensions_directory(cog_shell_get_web_context(shell), s_options.web_extensions_dir);
     }
 
-    webkit_web_context_set_tls_errors_policy (cog_shell_get_web_context (shell),
-                                              s_options.ignore_tls_errors
-                                              ? WEBKIT_TLS_ERRORS_POLICY_IGNORE
-                                              : WEBKIT_TLS_ERRORS_POLICY_FAIL);
+    if (s_options.enable_sandbox) {
+        webkit_web_context_set_sandbox_enabled(cog_shell_get_web_context(shell), TRUE);
+    }
+
+#if WEBKIT_CHECK_VERSION(2, 32, 0)
+    webkit_website_data_manager_set_tls_errors_policy(
+#else
+    webkit_web_context_set_tls_errors_policy(
+#endif
+        webkit_web_context_get_website_data_manager(cog_shell_get_web_context(shell)),
+        s_options.ignore_tls_errors ? WEBKIT_TLS_ERRORS_POLICY_IGNORE : WEBKIT_TLS_ERRORS_POLICY_FAIL);
+
+    if (s_options.filter_path) {
+        WebKitWebsiteDataManager *data_manager =
+            webkit_web_context_get_website_data_manager(cog_shell_get_web_context(shell));
+        g_autofree char *filters_path =
+            g_build_filename(webkit_website_data_manager_get_base_cache_directory(data_manager), "filters", NULL);
+        g_autoptr(WebKitUserContentFilterStore) store = webkit_user_content_filter_store_new(filters_path);
+
+        g_autoptr(GFile) file = g_file_new_for_commandline_arg(s_options.filter_path);
+        g_clear_pointer(&s_options.filter_path, g_free);
+
+        g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+        webkit_user_content_filter_store_save_from_file(store,
+                                                        "CogFilter",
+                                                        file,
+                                                        NULL,
+                                                        (GAsyncReadyCallback) on_filter_saved,
+                                                        loop);
+        g_main_loop_run(loop);
+    }
 
     return -1;  /* Continue startup. */
 }
@@ -301,31 +318,23 @@ platform_setup (CogShell *shell)
 
     g_debug ("%s: Platform name: %s", __func__, s_options.platform_name);
 
-    if (!s_options.platform_name)
-        return FALSE;
-
-    g_autofree char *platform_soname =
-        g_strdup_printf ("libcogplatform-%s.so", s_options.platform_name);
-    g_clear_pointer (&s_options.platform_name, g_free);
-
-    g_debug ("%s: Platform plugin: %s", __func__, platform_soname);
-
-    g_autoptr(CogPlatform) platform = cog_platform_new ();
-    if (!cog_platform_try_load (platform, platform_soname)) {
-        g_warning ("Could not load: %s (possible cause: %s).\n",
-                   platform_soname, strerror (errno));
+    g_autoptr(GError) error = NULL;
+    CogPlatform *platform = cog_platform_new(s_options.platform_name, &error);
+    if (!platform) {
+        g_warning("Cannot create platform: %s", error->message);
         return FALSE;
     }
 
-    g_autoptr(GError) error = NULL;
-    if (!cog_platform_setup (platform, shell, "", &error)) {
+    g_clear_pointer(&s_options.platform_name, g_free);
+
+    if (!cog_platform_setup(platform, shell, "", &error)) {
         g_warning ("Platform setup failed: %s", error->message);
         return FALSE;
     }
 
     s_options.platform = g_steal_pointer (&platform);
 
-    g_debug ("%s: Platform = %p", __func__, s_options.platform);
+    g_debug("%s: Selected %s @ %p", __func__, g_type_name(G_OBJECT_TYPE(s_options.platform)), s_options.platform);
     return TRUE;
 }
 
@@ -333,13 +342,7 @@ platform_setup (CogShell *shell)
 static void
 on_shutdown (CogLauncher *launcher G_GNUC_UNUSED, void *user_data G_GNUC_UNUSED)
 {
-    g_debug ("%s: Platform = %p", __func__, s_options.platform);
-
-    if (s_options.platform) {
-        cog_platform_teardown (s_options.platform);
-        g_clear_pointer (&s_options.platform, cog_platform_free);
-        g_debug ("%s: Platform teardown completed.", __func__);
-    }
+    g_clear_object(&s_options.platform);
 }
 
 static void*
@@ -384,22 +387,23 @@ on_create_view (CogShell *shell, void *user_data G_GNUC_UNUSED)
     if (!view_backend)
         g_error ("Could not instantiate any WPE backend.");
 
-    g_autoptr(WebKitWebView) web_view = g_object_new (WEBKIT_TYPE_WEB_VIEW,
-                                                      "settings", cog_shell_get_web_settings (shell),
-                                                      "web-context", web_context,
-                                                      "zoom-level", s_options.scale_factor,
-                                                      "backend", view_backend,
-                                                      NULL);
+    g_autoptr(WebKitWebView) web_view =
+        g_object_new(WEBKIT_TYPE_WEB_VIEW, "settings", cog_shell_get_web_settings(shell), "web-context", web_context,
+                     "zoom-level", s_options.scale_factor, "backend", view_backend, "is-controlled-by-automation",
+                     cog_shell_is_automated(shell), NULL);
+
+    if (s_options.filter) {
+        WebKitUserContentManager *manager = webkit_web_view_get_user_content_manager(web_view);
+        webkit_user_content_manager_add_filter(manager, s_options.filter);
+        g_clear_pointer(&s_options.filter, webkit_user_content_filter_unref);
+    }
 
     g_signal_connect (web_view, "create", G_CALLBACK (on_web_view_create), NULL);
 
     if (s_options.platform) {
         cog_platform_init_web_view (s_options.platform, web_view);
-
-#if COG_IM_API_SUPPORTED
         g_autoptr(WebKitInputMethodContext) im_context = cog_platform_create_im_context (s_options.platform);
         webkit_web_view_set_input_method_context (web_view, im_context);
-#endif
     }
 
     if (s_options.background_color != NULL) {
@@ -444,6 +448,14 @@ on_create_view (CogShell *shell, void *user_data G_GNUC_UNUSED)
     return g_steal_pointer (&web_view);
 }
 
+static void
+print_module_info(GIOExtension *extension, void *userdata G_GNUC_UNUSED)
+{
+    g_info("  %s - %d/%s",
+           g_io_extension_get_name(extension),
+           g_io_extension_get_priority(extension),
+           g_type_name(g_io_extension_get_type(extension)));
+}
 
 int
 main (int argc, char *argv[])
@@ -457,10 +469,25 @@ main (int argc, char *argv[])
         g_set_application_name ("Cog");
     }
 
-    g_autoptr(GApplication) app = G_APPLICATION (cog_launcher_get_default ());
-    g_application_add_main_option_entries (app, s_cli_options);
-    cog_launcher_add_web_settings_option_entries (COG_LAUNCHER (app));
-    cog_launcher_add_web_cookies_option_entries (COG_LAUNCHER (app));
+    cog_modules_add_directory(g_getenv("COG_MODULEDIR") ?: COG_MODULEDIR);
+
+    g_info("%s:", COG_MODULES_PLATFORM_EXTENSION_POINT);
+    cog_modules_foreach(COG_MODULES_PLATFORM, print_module_info, NULL);
+
+    // We need to check whether we'll use automation mode before creating the launcher
+    gboolean automated = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (g_str_equal("--automation", argv[i])) {
+            automated = TRUE;
+            break;
+        }
+    }
+
+    CogSessionType sessionType = automated ? COG_SESSION_AUTOMATED : COG_SESSION_REGULAR;
+    g_autoptr(GApplication) app = G_APPLICATION(cog_launcher_init_default(sessionType));
+    g_application_add_main_option_entries(app, s_cli_options);
+    cog_launcher_add_web_settings_option_entries(COG_LAUNCHER(app));
+    cog_launcher_add_web_cookies_option_entries(COG_LAUNCHER(app));
     cog_launcher_add_web_permissions_option_entries (COG_LAUNCHER (app));
 
     g_signal_connect (app, "shutdown", G_CALLBACK (on_shutdown), NULL);

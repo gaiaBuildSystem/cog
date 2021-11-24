@@ -3,7 +3,9 @@ Cog
 
 ![Cog (boat)](data/cog.png)
 
-[![Build Status](https://travis-ci.com/Igalia/cog.svg?branch=master)](https://travis-ci.com/Igalia/cog)
+[![Build - Native](https://github.com/Igalia/cog/actions/workflows/ci-native.yml/badge.svg)](https://github.com/Igalia/cog/actions/workflows/ci-native.yml)
+[![Build - ARM](https://github.com/Igalia/cog/actions/workflows/ci-cross.yml/badge.svg)](https://github.com/Igalia/cog/actions/workflows/ci-cross.yml)
+[![Code Style](https://github.com/Igalia/cog/actions/workflows/codestyle.yml/badge.svg)](https://github.com/Igalia/cog/actions/workflows/codestyle.yml)
 
 Cog is a small single “window” launcher for the [WebKit WPE
 port](https://trac.webkit.org/wiki/WPE). It is small, provides no user
@@ -47,8 +49,9 @@ Using Cog
 [CMake](http://cmake.org): `cmake . && make` should get you started, if your
 system has the needed [dependencies](#dependencies) installed.
 
-**Documentation** for `libcogcore` is currently unavailable, and
-contributions in this regard are very welcome.
+**Documentation** is available at
+[igalia.github.io/cog](https://igalia.github.io/cog/) but it is currently
+incomplete. Contributions in this regard are very welcome.
 
 **Bug tracking**: If you have found a bug, take a look at [out issue
 tracker](https://github.com/Igalia/cog/issues). Please see the “[reporting
