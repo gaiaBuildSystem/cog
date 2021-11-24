@@ -14,24 +14,28 @@
 #endif
 
 #include "cog-config.h"
+#include "cog-request-handler.h"
 #include "cog-shell.h"
-#include "cog-webkit-utils.h"
 
 G_BEGIN_DECLS
 
-typedef struct _CogRequestHandler CogRequestHandler;
+#define COG_TYPE_LAUNCHER (cog_launcher_get_type())
 
-#define COG_TYPE_LAUNCHER (cog_launcher_get_type ())
+G_DECLARE_FINAL_TYPE(CogLauncher, cog_launcher, COG, LAUNCHER, GApplication)
 
-G_DECLARE_FINAL_TYPE (CogLauncher, cog_launcher, COG, LAUNCHER, GApplication)
-
-struct _CogLauncherClass
-{
+struct _CogLauncherClass {
     GApplicationClass parent_class;
 };
 
+typedef enum {
+    COG_SESSION_REGULAR,
+    COG_SESSION_AUTOMATED,
+} CogSessionType;
+
 CogLauncher *cog_launcher_get_default                  (void);
+CogLauncher *cog_launcher_init_default(CogSessionType sessionType);
 CogShell    *cog_launcher_get_shell                    (CogLauncher *launcher);
+gboolean     cog_launcher_is_automated(CogLauncher *launcher);
 
 void  cog_launcher_add_web_settings_option_entries     (CogLauncher *launcher);
 void  cog_launcher_add_web_cookies_option_entries      (CogLauncher *launcher);

@@ -7,6 +7,8 @@
 
 #include "cog-shell.h"
 
+#include <wpe/webkit.h>
+
 /**
  * CogShell:
  *
@@ -26,6 +28,7 @@ typedef struct {
     GKeyFile         *config_file;
     gdouble           device_scale_factor;
     GHashTable       *request_handlers;  /* (string, RequestHandlerMapEntry) */
+    gboolean          automated;
 } CogShellPrivate;
 
 
@@ -42,6 +45,7 @@ enum {
     PROP_WEB_VIEW,
     PROP_CONFIG_FILE,
     PROP_DEVICE_SCALE_FACTOR,
+    PROP_AUTOMATED,
     N_PROPERTIES,
 };
 
@@ -57,22 +61,18 @@ enum {
 
 static int s_signals[N_SIGNALS] = { 0, };
 
-
 static WebKitWebView*
 cog_shell_create_view_base (CogShell *shell)
 {
-    return g_object_new (WEBKIT_TYPE_WEB_VIEW,
-                         "settings", cog_shell_get_web_settings (shell),
-                         "web-context", cog_shell_get_web_context (shell),
-                         NULL);
+    CogShellPrivate *priv = PRIV(shell);
+    return g_object_new(WEBKIT_TYPE_WEB_VIEW, "settings", cog_shell_get_web_settings(shell), "web-context",
+                        cog_shell_get_web_context(shell), "is-controlled-by-automation", priv->automated, NULL);
 }
-
 
 typedef struct {
     CogRequestHandler *handler;
     gboolean           registered;
 } RequestHandlerMapEntry;
-
 
 static inline RequestHandlerMapEntry*
 request_handler_map_entry_new (CogRequestHandler *handler)
@@ -120,12 +120,32 @@ request_handler_map_entry_register (const char             *scheme,
     }
 }
 
-
+static WebKitWebView *
+cog_shell_create_web_view_for_automation(WebKitAutomationSession *session, CogShell *shell)
+{
+    return PRIV(shell)->web_view;
+}
 
 static void
-cog_shell_startup_base (CogShell *shell)
+cog_shell_automation_started_callback(WebKitWebContext *context, WebKitAutomationSession *session, CogShell *shell)
 {
-    CogShellPrivate *priv = PRIV (shell);
+    g_autoptr(WebKitApplicationInfo) info = webkit_application_info_new();
+    webkit_application_info_set_version(info, WEBKIT_MAJOR_VERSION, WEBKIT_MINOR_VERSION, WEBKIT_MICRO_VERSION);
+    webkit_automation_session_set_application_info(session, info);
+
+    g_signal_connect(session, "create-web-view", G_CALLBACK(cog_shell_create_web_view_for_automation), shell);
+}
+
+static void
+cog_shell_web_view_close(WebKitWebView *view, CogShell *shell)
+{
+    g_object_unref(view);
+}
+
+static void
+cog_shell_startup_base(CogShell *shell)
+{
+    CogShellPrivate *priv = PRIV(shell);
 
     if (priv->request_handlers) {
         g_hash_table_foreach (priv->request_handlers,
@@ -143,14 +163,16 @@ cog_shell_startup_base (CogShell *shell)
      */
     g_assert (webkit_web_view_get_settings (priv->web_view) == priv->web_settings);
     g_assert (webkit_web_view_get_context (priv->web_view) == priv->web_context);
-}
 
+    webkit_web_context_set_automation_allowed(priv->web_context, priv->automated);
+    g_signal_connect(priv->web_context, "automation-started", G_CALLBACK(cog_shell_automation_started_callback), shell);
+    g_signal_connect(priv->web_view, "close", G_CALLBACK(cog_shell_web_view_close), shell);
+}
 
 static void
-cog_shell_shutdown_base (CogShell *shell G_GNUC_UNUSED)
+cog_shell_shutdown_base(CogShell *shell G_GNUC_UNUSED)
 {
 }
-
 
 static void
 cog_shell_get_property (GObject    *object,
@@ -174,9 +196,8 @@ cog_shell_get_property (GObject    *object,
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-    }
+        }
 }
-
 
 static void
 cog_shell_set_property (GObject      *object,
@@ -195,16 +216,18 @@ cog_shell_set_property (GObject      *object,
         case PROP_DEVICE_SCALE_FACTOR:
             PRIV (shell)->device_scale_factor = g_value_get_double (value);
             break;
+        case PROP_AUTOMATED:
+            PRIV(shell)->automated = g_value_get_boolean(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-    }
+        }
 }
 
-
 static void
-cog_shell_constructed (GObject *object)
+cog_shell_constructed(GObject *object)
 {
-    G_OBJECT_CLASS (cog_shell_parent_class)->constructed (object);
+    G_OBJECT_CLASS(cog_shell_parent_class)->constructed(object);
 
     CogShellPrivate *priv = PRIV (object);
 
@@ -215,24 +238,24 @@ cog_shell_constructed (GObject *object)
     g_autofree char *cache_dir =
         g_build_filename (g_get_user_cache_dir (), priv->name, NULL);
 
-    g_autoptr(WebKitWebsiteDataManager) manager =
-        webkit_website_data_manager_new ("base-data-directory", data_dir,
-                                         "base-cache-directory", cache_dir,
-                                         NULL);
+    g_autoptr(WebKitWebsiteDataManager) manager = NULL;
 
-    priv->web_context =
-        webkit_web_context_new_with_website_data_manager (manager);
+    if (priv->automated)
+        manager = webkit_website_data_manager_new_ephemeral();
+    else
+        manager =
+            webkit_website_data_manager_new("base-data-directory", data_dir, "base-cache-directory", cache_dir, NULL);
+    priv->web_context = webkit_web_context_new_with_website_data_manager(manager);
 }
 
-
 static void
-cog_shell_dispose (GObject *object)
+cog_shell_dispose(GObject *object)
 {
-    CogShellPrivate *priv = PRIV (object);
+    CogShellPrivate *priv = PRIV(object);
 
-    g_clear_object (&priv->web_view);
+    g_clear_object(&priv->web_view);
     g_clear_object (&priv->web_context);
-    g_clear_object (&priv->web_settings);
+    g_clear_object(&priv->web_settings);
 
     g_clear_pointer (&priv->request_handlers, g_hash_table_unref);
     g_clear_pointer (&priv->name, g_free);
@@ -240,7 +263,6 @@ cog_shell_dispose (GObject *object)
 
     G_OBJECT_CLASS (cog_shell_parent_class)->dispose (object);
 }
-
 
 static void
 cog_shell_class_init (CogShellClass *klass)
@@ -339,6 +361,13 @@ cog_shell_class_init (CogShellClass *klass)
                              G_PARAM_READABLE |
                              G_PARAM_STATIC_STRINGS);
 
+    /**
+     * CogShell:config-file: (attributes org.gtk.Property.get=cog_shell_get_config_file):
+     *
+     * Optional configuration as a `GKeyFile`. This allows setting options
+     * which can be read elsewhere. This is typically used to provide
+     * additional options to [platform modules](overview.html).
+     */
     s_properties[PROP_CONFIG_FILE] =
         g_param_spec_boxed ("config-file",
                             "Configuration File",
@@ -354,32 +383,36 @@ cog_shell_class_init (CogShellClass *klass)
                              0, 64.0, 1.0,
                              G_PARAM_READWRITE);
 
-    g_object_class_install_properties (object_class, N_PROPERTIES, s_properties);
+    s_properties[PROP_AUTOMATED] = g_param_spec_boolean("automated",
+                                                        "Automated",
+                                                        "Whether this session is automated",
+                                                        FALSE,
+                                                        G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY);
+
+    g_object_class_install_properties(object_class, N_PROPERTIES, s_properties);
 }
 
-
 static void
-cog_shell_init (CogShell *shell G_GNUC_UNUSED)
+cog_shell_init(CogShell *shell G_GNUC_UNUSED)
 {
-    CogShellPrivate *priv = PRIV (shell);
+    CogShellPrivate *priv = PRIV(shell);
     if (!priv->name)
-        priv->name = g_strdup (g_get_prgname ());
+        priv->name = g_strdup(g_get_prgname());
 }
 
 /**
  * cog_shell_new: (constructor)
  * @name: Name of the shell.
+ * @automated: Whether this shell is controlled by automation.
  *
  * Creates a new shell.
  *
  * Returns: (transfer full): A new shell instance.
  */
-CogShell*
-cog_shell_new (const char *name)
+CogShell *
+cog_shell_new(const char *name, gboolean automated)
 {
-    return g_object_new (COG_TYPE_SHELL,
-                         "name", name,
-                         NULL);
+    return g_object_new(COG_TYPE_SHELL, "name", name, "automated", automated, NULL);
 }
 
 /**
@@ -389,11 +422,11 @@ cog_shell_new (const char *name)
  *
  * Returns: A web context.
  */
-WebKitWebContext*
-cog_shell_get_web_context (CogShell *shell)
+WebKitWebContext *
+cog_shell_get_web_context(CogShell *shell)
 {
-    g_return_val_if_fail (COG_IS_SHELL (shell), NULL);
-    return PRIV (shell)->web_context;
+    g_return_val_if_fail(COG_IS_SHELL(shell), NULL);
+    return PRIV(shell)->web_context;
 }
 
 /**
@@ -438,7 +471,15 @@ cog_shell_get_name (CogShell *shell)
     return PRIV (shell)->name;
 }
 
-
+/**
+ * cog_shell_get_config_file:
+ *
+ * Obtains the additional configuration for this shell.
+ *
+ * See [property@Cog.Shell:config-file] for details.
+ *
+ * Returns: (nullable): `GKeyFile` used as configuration.
+ */
 GKeyFile*
 cog_shell_get_config_file (CogShell *shell)
 {
@@ -454,6 +495,13 @@ cog_shell_get_device_scale_factor (CogShell *shell)
     return PRIV(shell)->device_scale_factor;
 }
 
+gboolean
+cog_shell_is_automated(CogShell *shell)
+{
+    g_return_val_if_fail(COG_IS_SHELL(shell), 0);
+    return PRIV(shell)->automated;
+}
+
 /**
  * cog_shell_set_request_handler:
  * @scheme: Name of the custom URI scheme.
@@ -462,15 +510,13 @@ cog_shell_get_device_scale_factor (CogShell *shell)
  * Installs a handler for a custom URI scheme.
  */
 void
-cog_shell_set_request_handler (CogShell          *shell,
-                               const char        *scheme,
-                               CogRequestHandler *handler)
+cog_shell_set_request_handler(CogShell *shell, const char *scheme, CogRequestHandler *handler)
 {
-    g_return_if_fail (COG_IS_SHELL (shell));
-    g_return_if_fail (scheme != NULL);
-    g_return_if_fail (COG_IS_REQUEST_HANDLER (handler));
+    g_return_if_fail(COG_IS_SHELL(shell));
+    g_return_if_fail(scheme != NULL);
+    g_return_if_fail(COG_IS_REQUEST_HANDLER(handler));
 
-    CogShellPrivate *priv = PRIV (shell);
+    CogShellPrivate *priv = PRIV(shell);
 
     if (!priv->request_handlers) {
         priv->request_handlers =

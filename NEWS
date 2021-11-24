@@ -1,26 +1,41 @@
 ==========================
-0.10.1 - September 7, 2021
+0.12.0 - November 24, 2021
 ==========================
 
-- drm: Added support for absolute pointer motion events.
-- drm: Fixed the build with the platform module enabled.
-- headless: Added a COG_PLATFORM_HEADLESS CMake option to make the
-  platform module optional.
+- This release does not contain changes over the 0.11.90 development release.
 
-=====================
-0.10.0 - May 18, 2021
-=====================
+===========================
+0.11.90 - November 11, 2021
+===========================
 
-- Fix the location where the D-Bus policy config gets installed.
+- core: Removed cog_platform_teardown(), deinitilization of platform
+  plug-in implementations is now done automatically as part of object
+  finalization.
+- core: Fixed building the documentation when using libsoup3.
+- drm: Fixed two small memory leaks during initialization.
 
-======================
-0.9.90 - April 1, 2021
-======================
+=========================
+0.11.1 - November 3, 2021
+=========================
 
-- Support building documentation for the Cog core library using gi-docgen.
-- gtk4: Added mew "gtk4" platform module, which works on Wayland and uses
-  GTK4 to render web content into a GtkGLArea and provides a minimal yet
-  usable user interface
+- core: Changed platform plug-ins to be able to automatically detect which
+  one should be used. Passing the "--platform=" command line option to the
+  launcher is now optional.
+- core: Added support for building against libsoup3.
+- core: Added CogHostRoutesHandler, which can route URI scheme requests
+  with different host parts to other handlers.
+- core, cog: Added support for running in WebDriver automation mode.
+- cog: New "--enable-sandbox" command line option, which allows isolating
+  rendering processes from the rest of the system.
+- cog: New "--content-filter=" command line option, which allows loading
+  a content blocker (WebKitUserContentFilter) JSON rule set.
+- drm: Implemented handling of pointer axis/wheel/finger/continuous events
+  and absolute motion events.
+- wl: Renamed "fdo" platform module to "wl" (Wayland) as it better reflects
+  its usage; the old name still works e.g. when using "cog --platform=fdo"
+  but it is considered deprecated and will cause a warning.
+- wl, gtk4: Added support for fullscreening web views.
+- gtk4: Honor the CogShell.device-scale-factor property.
 
 ======================
 0.9.1 - March 16, 2021
