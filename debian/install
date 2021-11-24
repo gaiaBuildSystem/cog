@@ -1,4 +1,4 @@
 usr/bin/*
 usr/lib/*/*.so.*
-usr/lib/*/libcogplatform-*.so
+usr/lib/*/cog/modules/libcogplatform-*.so
 usr/share/man
