@@ -1,4 +1,4 @@
-cog (0.12.0-2) UNRELEASED; urgency=medium
+cog (0.12.0-2) unstable; urgency=medium
 
   * debian/patches/fix-moduledir.patch:
     - This patch was broken, fix applying upstream commit 64effa9.
