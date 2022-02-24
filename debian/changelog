@@ -4,6 +4,8 @@ cog (0.12.1-1) UNRELEASED; urgency=medium
   * Drop debian/patches/fix-moduledir.patch.
   * debian/watch:
     - Scan for stable releases only.
+  * debian/copyright:
+    - Update copyright years.
 
  -- Alberto Garcia <berto@igalia.com>  Fri, 25 Feb 2022 00:37:38 +0100
 
