@@ -1,6 +1,7 @@
 cog (0.12.1-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * Drop debian/patches/fix-moduledir.patch.
   * debian/watch:
     - Scan for stable releases only.
 
