@@ -3,7 +3,7 @@ cmake_minimum_required (VERSION 3.3)
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
 
-set_project_version(0 12 1)
+set_project_version(0 12 4)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -12,7 +12,7 @@ set_project_version(0 12 1)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 7 2 0)
+calculate_library_versions_from_libtool_triple(COGCORE 7 5 0)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
 include(DistTargets)
@@ -73,7 +73,19 @@ set(COG_APPID "" CACHE STRING "Default GApplication unique identifier")
 set(COG_HOME_URI "" CACHE STRING "Default home URI")
 
 set(COG_MODULEDIR "${CMAKE_INSTALL_LIBDIR}/cog/modules"
-    CACHE STRING "Default search path for loadable modules")
+    CACHE PATH "Default search path for loadable modules")
+
+# Make sure that the module path is always absolute. If the specified
+# value is relative, this makes it a child of CMAKE_INSTALL_PREFIX.
+if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.20)
+    cmake_path(ABSOLUTE_PATH COG_MODULEDIR BASE_DIRECTORY ${CMAKE_INSTALL_PREFIX} NORMALIZE)
+elseif (NOT IS_ABSOLUTE ${COG_MODULEDIR})
+    set(COG_MODULEDIR "${CMAKE_INSTALL_PREFIX}/${COG_MODULEDIR}")
+endif ()
+if (NOT IS_ABSOLUTE ${COG_MODULEDIR})
+    message(FATAL_ERROR "Cog module location '${COG_MODULEDIR}' is not an absolute path")
+endif ()
+message(STATUS "Cog module path: ${COG_MODULEDIR}")
 
 if (NOT COG_APPID OR COG_APPID STREQUAL "")
     set(COG_DEFAULT_APPID com.igalia.Cog)

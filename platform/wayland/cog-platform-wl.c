@@ -63,7 +63,7 @@
 
 #define DEFAULT_ZOOM_STEP 0.1f
 
-#if defined(WPE_WL_CHECK_VERSION)
+#if defined(WPE_FDO_CHECK_VERSION)
 #    define HAVE_SHM_EXPORTED_BUFFER WPE_FDO_CHECK_VERSION(1, 9, 0)
 #    define HAVE_FULLSCREEN_HANDLING WPE_FDO_CHECK_VERSION(1, 11, 1)
 #else
@@ -608,6 +608,7 @@ output_handle_done(void *data, struct wl_output *output)
     }
 }
 
+#ifdef WL_OUTPUT_SCALE_SINCE_VERSION
 static void
 output_handle_scale(void *data, struct wl_output *output, int32_t factor)
 {
@@ -619,6 +620,7 @@ output_handle_scale(void *data, struct wl_output *output, int32_t factor)
     metrics->scale = factor;
     g_info("Got scale factor %i for output %p\n", factor, output);
 }
+#endif /* WL_OUTPUT_SCALE_SINCE_VERSION */
 
 static bool
 cog_wl_does_image_match_win_size(struct wpe_fdo_egl_exported_image *image)
@@ -707,12 +709,15 @@ static const struct wl_output_listener output_listener = {
     .geometry = noop,
     .mode = output_handle_mode,
     .done = output_handle_done,
+#ifdef WL_OUTPUT_SCALE_SINCE_VERSION
     .scale = output_handle_scale,
+#endif /* WL_OUTPUT_SCALE_SINCE_VERSION */
 };
 
 static void
 surface_handle_enter(void *data, struct wl_surface *surface, struct wl_output *output)
 {
+#ifdef WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION
     int32_t scale_factor = -1;
 
     for (int i = 0; i < G_N_ELEMENTS(wl_data.metrics); i++) {
@@ -725,9 +730,12 @@ surface_handle_enter(void *data, struct wl_surface *surface, struct wl_output *o
         return;
     }
     g_debug("Surface entered output %p with scale factor %i\n", output, scale_factor);
-    wl_surface_set_buffer_scale(surface, scale_factor);
-    wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, scale_factor);
-    wl_data.current_output.scale = scale_factor;
+    if (wl_surface_get_version(surface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION) {
+        wl_surface_set_buffer_scale(surface, scale_factor);
+        wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, scale_factor);
+        wl_data.current_output.scale = scale_factor;
+    }
+#endif /* WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION */
 }
 
 static const struct wl_surface_listener surface_listener = {
@@ -745,35 +753,37 @@ registry_global (void               *data,
     gboolean interface_used = TRUE;
 
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        wl_data.compositor = wl_registry_bind(registry, name, &wl_compositor_interface, version);
+        /* Version 3 introduced wl_surface_set_buffer_scale() */
+        wl_data.compositor = wl_registry_bind(registry, name, &wl_compositor_interface, MIN(3, version));
     } else if (strcmp(interface, wl_subcompositor_interface.name) == 0) {
-        wl_data.subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, version);
+        wl_data.subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
     } else if (strcmp(interface, wl_shell_interface.name) == 0) {
-        wl_data.shell = wl_registry_bind(registry, name, &wl_shell_interface, version);
+        wl_data.shell = wl_registry_bind(registry, name, &wl_shell_interface, 1);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        wl_data.shm = wl_registry_bind(registry, name, &wl_shm_interface, version);
+        wl_data.shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        wl_data.xdg_shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, version);
+        wl_data.xdg_shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
         g_assert(wl_data.xdg_shell);
         xdg_wm_base_add_listener(wl_data.xdg_shell, &xdg_shell_listener, NULL);
     } else if (strcmp(interface, zwp_fullscreen_shell_v1_interface.name) == 0) {
-        wl_data.fshell = wl_registry_bind(registry, name, &zwp_fullscreen_shell_v1_interface, version);
+        wl_data.fshell = wl_registry_bind(registry, name, &zwp_fullscreen_shell_v1_interface, 1);
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        wl_data.seat = wl_registry_bind(registry, name, &wl_seat_interface, MAX(3, MAX(version, 7)));
+        wl_data.seat = wl_registry_bind(registry, name, &wl_seat_interface, MAX(3, MIN(version, 7)));
 #if COG_ENABLE_WESTON_DIRECT_DISPLAY
     } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
         if (version < 3) {
             g_warning("Version %d of the zwp_linux_dmabuf_v1 protocol is not supported", version);
             return;
         }
-        wl_data.dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, version);
+        wl_data.dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, 3);
     } else if (strcmp(interface, weston_direct_display_v1_interface.name) == 0) {
-        wl_data.direct_display = wl_registry_bind(registry, name, &weston_direct_display_v1_interface, version);
+        wl_data.direct_display = wl_registry_bind(registry, name, &weston_direct_display_v1_interface, 1);
     } else if (strcmp(interface, weston_content_protection_interface.name) == 0) {
-        wl_data.protection = wl_registry_bind(registry, name, &weston_content_protection_interface, version);
+        wl_data.protection = wl_registry_bind(registry, name, &weston_content_protection_interface, 1);
 #endif /* COG_ENABLE_WESTON_DIRECT_DISPLAY */
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        struct wl_output *output = wl_registry_bind(registry, name, &wl_output_interface, version);
+        /* Version 2 introduced the wl_output_listener::scale. */
+        struct wl_output *output = wl_registry_bind(registry, name, &wl_output_interface, MIN(2, version));
         wl_output_add_listener(output, &output_listener, NULL);
         bool inserted = false;
         for (int i = 0; i < G_N_ELEMENTS(wl_data.metrics); i++) {
@@ -788,15 +798,11 @@ registry_global (void               *data,
             g_warning("Exceeded %" G_GSIZE_FORMAT " connected outputs(!)", G_N_ELEMENTS(wl_data.metrics));
         }
     } else if (strcmp(interface, zwp_text_input_manager_v3_interface.name) == 0) {
-        wl_data.text_input_manager = wl_registry_bind(registry, name, &zwp_text_input_manager_v3_interface, version);
+        wl_data.text_input_manager = wl_registry_bind(registry, name, &zwp_text_input_manager_v3_interface, 1);
     } else if (strcmp(interface, zwp_text_input_manager_v1_interface.name) == 0) {
-        wl_data.text_input_manager_v1 = wl_registry_bind(registry, name, &zwp_text_input_manager_v1_interface, version);
-#ifdef COG_USE_WAYLAND_CURSOR
-    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        wl_data.wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, version);
-#endif /* COG_USE_WAYLAND_CURSOR */
+        wl_data.text_input_manager_v1 = wl_registry_bind(registry, name, &zwp_text_input_manager_v1_interface, 1);
     } else if (strcmp(interface, wp_presentation_interface.name) == 0) {
-        wl_data.presentation = wl_registry_bind(registry, name, &wp_presentation_interface, version);
+        wl_data.presentation = wl_registry_bind(registry, name, &wp_presentation_interface, 1);
     } else {
         interface_used = FALSE;
     }
@@ -1470,15 +1476,19 @@ seat_on_capabilities (void* data, struct wl_seat* seat, uint32_t capabilities)
     g_debug ("Done enumerating seat capabilities.");
 }
 
+#ifdef WL_SEAT_NAME_SINCE_VERSION
 static void
 seat_on_name (void *data, struct wl_seat *seat, const char *name)
 {
     g_debug ("Seat name: '%s'", name);
 }
+#endif /* WL_SEAT_NAME_SINCE_VERSION */
 
 static const struct wl_seat_listener seat_listener = {
     .capabilities = seat_on_capabilities,
+#ifdef WL_SEAT_NAME_SINCE_VERSION
     .name = seat_on_name,
+#endif /* WL_SEAT_NAME_SINCE_VERSION */
 };
 
 static void
@@ -1695,8 +1705,8 @@ static void
 shm_buffer_destroy(struct shm_buffer *buffer)
 {
     if (buffer->exported_buffer) {
-        wpe_view_backend_exportable_wl_egl_dispatch_release_shm_exported_buffer(wpe_host_data.exportable,
-                                                                                buffer->exported_buffer);
+        wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(wpe_host_data.exportable,
+                                                                                 buffer->exported_buffer);
     }
 
     wl_buffer_destroy(buffer->buffer);
@@ -2221,7 +2231,11 @@ create_popup (WebKitOptionMenu *option_menu)
 
     popup_data.wl_surface = wl_compositor_create_surface (wl_data.compositor);
     g_assert (popup_data.wl_surface);
-    wl_surface_set_buffer_scale (popup_data.wl_surface, wl_data.current_output.scale);
+
+#ifdef WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION
+    if (wl_surface_get_version(popup_data.wl_surface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+        wl_surface_set_buffer_scale(popup_data.wl_surface, wl_data.current_output.scale);
+#endif /* WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION */
 
     if (wl_data.xdg_shell != NULL) {
         popup_data.xdg_positioner = xdg_wm_base_create_positioner (wl_data.xdg_shell);
