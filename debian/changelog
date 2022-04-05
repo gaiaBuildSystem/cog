@@ -1,6 +1,9 @@
 cog (0.12.4-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * Switch from libsoup2 to libsoup3:
+    - debian/control: change build dependency to libwpewebkit-1.1-dev.
+    - debian/rules: build with -DUSE_SOUP2=OFF.
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 05 Apr 2022 10:16:34 +0200
 

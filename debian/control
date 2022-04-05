@@ -10,7 +10,7 @@ Build-Depends: debhelper-compat (= 12),
                libinput-dev,
                libwayland-dev,
                libwpebackend-fdo-1.0-dev (>= 1.10.0),
-               libwpewebkit-1.0-dev,
+               libwpewebkit-1.1-dev,
                wayland-protocols
 Standards-Version: 4.6.0.1
 Rules-Requires-Root: no
