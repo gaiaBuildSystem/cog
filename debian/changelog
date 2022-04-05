@@ -1,4 +1,4 @@
-cog (0.12.4-1) UNRELEASED; urgency=medium
+cog (0.12.4-1) unstable; urgency=medium
 
   * New upstream release.
   * Switch from libsoup2 to libsoup3:
