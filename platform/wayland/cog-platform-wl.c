@@ -48,10 +48,13 @@
 #include "xdg-shell-client.h"
 
 #if COG_ENABLE_WESTON_DIRECT_DISPLAY
-#include <drm_fourcc.h>
-#include <wpe/extensions/video-plane-display-dmabuf.h>
-#include "weston-direct-display-client-protocol.h"
-#include "weston-content-protection-client-protocol.h"
+#    include "weston-direct-display-client.h"
+#    include <drm_fourcc.h>
+#    include <wpe/extensions/video-plane-display-dmabuf.h>
+#endif
+
+#if COG_ENABLE_WESTON_CONTENT_PROTECTION
+#    include "weston-content-protection-client.h"
 #endif
 
 #ifdef COG_USE_WAYLAND_CURSOR
@@ -62,6 +65,12 @@
 #define DEFAULT_HEIGHT  768
 
 #define DEFAULT_ZOOM_STEP 0.1f
+
+#if defined(WPE_CHECK_VERSION)
+#    define HAVE_REFRESH_RATE_HANDLING WPE_CHECK_VERSION(1, 13, 2)
+#else
+#    define HAVE_REFRESH_RATE_HANDLING 0
+#endif
 
 #if defined(WPE_FDO_CHECK_VERSION)
 #    define HAVE_SHM_EXPORTED_BUFFER WPE_FDO_CHECK_VERSION(1, 9, 0)
@@ -76,7 +85,8 @@ struct _CogWlPlatformClass {
 };
 
 struct _CogWlPlatform {
-    CogPlatform parent;
+    CogPlatform    parent;
+    WebKitWebView *web_view;
 };
 
 G_DECLARE_FINAL_TYPE(CogWlPlatform, cog_wl_platform, COG, WL_PLATFORM, CogPlatform)
@@ -103,7 +113,9 @@ struct video_buffer {
 };
 
 struct video_surface {
+#    if COG_ENABLE_WESTON_CONTENT_PROTECTION
     struct weston_protected_surface *protected_surface;
+#    endif
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
 };
@@ -125,16 +137,16 @@ struct shm_buffer {
 #endif
 
 #ifndef EGL_WL_create_wayland_buffer_from_image
-typedef struct wl_buffer * (EGLAPIENTRYP PFNEGLCREATEWAYLANDBUFFERFROMIMAGEWL) (EGLDisplay dpy, EGLImageKHR image);
+typedef struct wl_buffer *(EGLAPIENTRYP PFNEGLCREATEWAYLANDBUFFERFROMIMAGEWL)(EGLDisplay dpy, EGLImageKHR image);
 #endif
 
-
 typedef struct output_metrics {
-  struct wl_output *output;
-  int32_t name;
-  int32_t scale;
-  int32_t width;
-  int32_t height;
+    struct wl_output *output;
+    int32_t           name;
+    int32_t           scale;
+    int32_t           width;
+    int32_t           height;
+    int32_t           refresh;
 } output_metrics;
 
 static struct {
@@ -154,6 +166,9 @@ static struct {
 #if COG_ENABLE_WESTON_DIRECT_DISPLAY
     struct zwp_linux_dmabuf_v1 *dmabuf;
     struct weston_direct_display_v1 *direct_display;
+#endif
+
+#if COG_ENABLE_WESTON_CONTENT_PROTECTION
     struct weston_content_protection *protection;
 #endif
 
@@ -596,7 +611,8 @@ output_handle_mode(void *data, struct wl_output *output, uint32_t flags, int32_t
     if (flags & WL_OUTPUT_MODE_CURRENT) {
         metrics->width = width;
         metrics->height = height;
-        g_info("Output %p is %" PRId32 "x%" PRId32, output, width, height);
+        metrics->refresh = refresh;
+        g_info("Output %p is %" PRId32 "x%" PRId32 " @ %.2fHz", output, width, height, refresh / 1000.f);
     }
 }
 
@@ -719,23 +735,32 @@ surface_handle_enter(void *data, struct wl_surface *surface, struct wl_output *o
 {
 #ifdef WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION
     int32_t scale_factor = -1;
+    int32_t refresh = 0;
 
     for (int i = 0; i < G_N_ELEMENTS(wl_data.metrics); i++) {
         if (wl_data.metrics[i].output == output) {
             scale_factor = wl_data.metrics[i].scale;
+            refresh = wl_data.metrics[i].refresh;
         }
     }
     if (scale_factor == -1) {
-        g_warning("No scale factor available for output %p\n", output);
+        g_warning("No scale factor available for output %p", output);
         return;
     }
-    g_debug("Surface entered output %p with scale factor %i\n", output, scale_factor);
+    if (refresh < 0) {
+        g_warning("Refresh rate less than zero for output %p", output);
+        return;
+    }
     if (wl_surface_get_version(surface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION) {
         wl_surface_set_buffer_scale(surface, scale_factor);
         wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, scale_factor);
         wl_data.current_output.scale = scale_factor;
     }
 #endif /* WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION */
+
+#if HAVE_REFRESH_RATE_HANDLING
+    wpe_view_backend_set_target_refresh_rate(wpe_view_data.backend, refresh);
+#endif /* HAVE_REFRESH_RATE_HANDLING */
 }
 
 static const struct wl_surface_listener surface_listener = {
@@ -778,9 +803,11 @@ registry_global (void               *data,
         wl_data.dmabuf = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, 3);
     } else if (strcmp(interface, weston_direct_display_v1_interface.name) == 0) {
         wl_data.direct_display = wl_registry_bind(registry, name, &weston_direct_display_v1_interface, 1);
+#endif /* COG_ENABLE_WESTON_DIRECT_DISPLAY */
+#if COG_ENABLE_WESTON_CONTENT_PROTECTION
     } else if (strcmp(interface, weston_content_protection_interface.name) == 0) {
         wl_data.protection = wl_registry_bind(registry, name, &weston_content_protection_interface, 1);
-#endif /* COG_ENABLE_WESTON_DIRECT_DISPLAY */
+#endif /* COG_ENABLE_WESTON_CONTENT_PROTECTION */
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
         /* Version 2 introduced the wl_output_listener::scale. */
         struct wl_output *output = wl_registry_bind(registry, name, &wl_output_interface, MIN(2, version));
@@ -1061,69 +1088,77 @@ keyboard_on_leave (void *data,
 }
 
 static bool
-capture_app_key_bindings (uint32_t keysym,
-                          uint32_t unicode,
-                          uint32_t state,
-                          uint8_t modifiers)
+capture_app_key_bindings(CogWlPlatform *self, uint32_t keysym, uint32_t unicode, uint32_t state, uint8_t modifiers)
 {
-    CogLauncher *launcher = cog_launcher_get_default ();
-    WebKitWebView *web_view =
-        cog_shell_get_web_view (cog_launcher_get_shell (launcher));
+    GApplication *app = g_application_get_default();
+    if (!app || !self->web_view)
+        return false;
 
-    if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        /* fullscreen */
-        if (modifiers == 0 && unicode == 0 && keysym == XKB_KEY_F11) {
+    if (state != WL_KEYBOARD_KEY_STATE_PRESSED)
+        return false;
+
+    /* fullscreen */
+    if (modifiers == 0 && unicode == 0 && keysym == XKB_KEY_F11) {
 #if HAVE_FULLSCREEN_HANDLING
-            if (win_data.is_fullscreen && win_data.was_fullscreen_requested_from_dom) {
-                wpe_view_backend_dispatch_request_exit_fullscreen(wpe_view_data.backend);
-                return true;
-            }
+        if (win_data.is_fullscreen && win_data.was_fullscreen_requested_from_dom) {
+            wpe_view_backend_dispatch_request_exit_fullscreen(wpe_view_data.backend);
+            return true;
+        }
 #endif
-            cog_wl_set_fullscreen(0, !win_data.is_fullscreen);
-            return true;
-        }
-        /* Ctrl+W, exit the application */
-        else if (modifiers == wpe_input_keyboard_modifier_control && unicode == 0x17 && keysym == 0x77) {
-            g_application_quit (G_APPLICATION (launcher));
-            return true;
-        }
-        /* Ctrl+Plus, zoom in */
-        else if (modifiers == wpe_input_keyboard_modifier_control && unicode == XKB_KEY_equal &&
-                 keysym == XKB_KEY_equal) {
-            const double level = webkit_web_view_get_zoom_level (web_view);
-            webkit_web_view_set_zoom_level (web_view,
-                                            level + DEFAULT_ZOOM_STEP);
-            return true;
-        }
-        /* Ctrl+Minus, zoom out */
-        else if (modifiers == wpe_input_keyboard_modifier_control && unicode == 0x2D && keysym == 0x2D) {
-            const double level = webkit_web_view_get_zoom_level (web_view);
-            webkit_web_view_set_zoom_level (web_view,
-                                            level - DEFAULT_ZOOM_STEP);
-            return true;
-        }
-        /* Ctrl+0, restore zoom level to 1.0 */
-        else if (modifiers == wpe_input_keyboard_modifier_control && unicode == XKB_KEY_0 && keysym == XKB_KEY_0) {
-            webkit_web_view_set_zoom_level (web_view, 1.0f);
-            return true;
-        }
-        /* Alt+Left, navigate back */
-        else if (modifiers == wpe_input_keyboard_modifier_alt && unicode == 0 && keysym == XKB_KEY_Left) {
-            webkit_web_view_go_back (web_view);
-            return true;
-        }
-        /* Alt+Right, navigate forward */
-        else if (modifiers == wpe_input_keyboard_modifier_alt && unicode == 0 && keysym == XKB_KEY_Right) {
-            webkit_web_view_go_forward (web_view);
-            return true;
-        }
+        cog_wl_set_fullscreen(0, !win_data.is_fullscreen);
+        return true;
+    }
+
+    /* Ctrl+W, exit the application */
+    if (modifiers == wpe_input_keyboard_modifier_control && unicode == 0x17 && keysym == 0x77) {
+        g_application_quit(app);
+        return true;
+    }
+
+    /* Ctrl+Plus, zoom in */
+    if (modifiers == wpe_input_keyboard_modifier_control && unicode == XKB_KEY_equal && keysym == XKB_KEY_equal) {
+        const double level = webkit_web_view_get_zoom_level(self->web_view);
+        webkit_web_view_set_zoom_level(self->web_view, level + DEFAULT_ZOOM_STEP);
+        return true;
+    }
+
+    /* Ctrl+Minus, zoom out */
+    if (modifiers == wpe_input_keyboard_modifier_control && unicode == 0x2D && keysym == 0x2D) {
+        const double level = webkit_web_view_get_zoom_level(self->web_view);
+        webkit_web_view_set_zoom_level(self->web_view, level - DEFAULT_ZOOM_STEP);
+        return true;
+    }
+
+    /* Ctrl+0, restore zoom level to 1.0 */
+    if (modifiers == wpe_input_keyboard_modifier_control && unicode == XKB_KEY_0 && keysym == XKB_KEY_0) {
+        webkit_web_view_set_zoom_level(self->web_view, 1.0f);
+        return true;
+    }
+
+    /* Alt+Left, navigate back */
+    if (modifiers == wpe_input_keyboard_modifier_alt && unicode == 0 && keysym == XKB_KEY_Left) {
+        webkit_web_view_go_back(self->web_view);
+        return true;
+    }
+
+    /* Alt+Right, navigate forward */
+    if (modifiers == wpe_input_keyboard_modifier_alt && unicode == 0 && keysym == XKB_KEY_Right) {
+        webkit_web_view_go_forward(self->web_view);
+        return true;
+    }
+
+    /* Ctrl+R or F5, reload */
+    if ((modifiers == wpe_input_keyboard_modifier_control && unicode == 0x12 && keysym == 0x72) ||
+        (modifiers == 0 && unicode == 0 && keysym == XKB_KEY_F5)) {
+        webkit_web_view_reload(self->web_view);
+        return true;
     }
 
     return false;
 }
 
 static void
-handle_key_event (uint32_t key, uint32_t state, uint32_t time)
+handle_key_event(CogWlPlatform *self, uint32_t key, uint32_t state, uint32_t time)
 {
     if (xkb_data.state == NULL)
         return;
@@ -1132,7 +1167,7 @@ handle_key_event (uint32_t key, uint32_t state, uint32_t time)
     uint32_t unicode = xkb_state_key_get_utf32 (xkb_data.state, key);
 
     /* Capture app-level key-bindings here */
-    if (capture_app_key_bindings (keysym, unicode, state, xkb_data.modifiers))
+    if (capture_app_key_bindings(self, keysym, unicode, state, xkb_data.modifiers))
         return;
 
     if (xkb_data.compose_state != NULL
@@ -1151,15 +1186,15 @@ handle_key_event (uint32_t key, uint32_t state, uint32_t time)
 }
 
 static gboolean
-repeat_delay_timeout(void *data)
+repeat_delay_timeout(CogWlPlatform *self)
 {
-    handle_key_event (wl_data.keyboard.repeat_data.key,
-                      wl_data.keyboard.repeat_data.state,
-                      wl_data.keyboard.repeat_data.time);
+    handle_key_event(self,
+                     wl_data.keyboard.repeat_data.key,
+                     wl_data.keyboard.repeat_data.state,
+                     wl_data.keyboard.repeat_data.time);
 
     wl_data.keyboard.repeat_data.event_source =
-        g_timeout_add (wl_data.keyboard.repeat_info.rate,
-                       (GSourceFunc) repeat_delay_timeout, NULL);
+        g_timeout_add(wl_data.keyboard.repeat_info.rate, (GSourceFunc) repeat_delay_timeout, self);
 
     return G_SOURCE_REMOVE;
 }
@@ -1172,12 +1207,14 @@ keyboard_on_key (void *data,
                  uint32_t key,
                  uint32_t state)
 {
+    CogWlPlatform *self = data;
+
     /* @FIXME: investigate why is this necessary */
     // IDK.
     key += 8;
 
     wl_data.event_serial = serial;
-    handle_key_event (key, state, time);
+    handle_key_event(self, key, state, time);
 
     if (wl_data.keyboard.repeat_info.rate == 0)
         return;
@@ -1200,8 +1237,7 @@ keyboard_on_key (void *data,
         wl_data.keyboard.repeat_data.time = time;
         wl_data.keyboard.repeat_data.state = state;
         wl_data.keyboard.repeat_data.event_source =
-            g_timeout_add (wl_data.keyboard.repeat_info.delay,
-                           (GSourceFunc) repeat_delay_timeout, NULL);
+            g_timeout_add(wl_data.keyboard.repeat_info.delay, (GSourceFunc) repeat_delay_timeout, self);
     }
 }
 
@@ -1454,7 +1490,7 @@ seat_on_capabilities (void* data, struct wl_seat* seat, uint32_t capabilities)
     if (has_keyboard && wl_data.keyboard.obj == NULL) {
         wl_data.keyboard.obj = wl_seat_get_keyboard (wl_data.seat);
         g_assert (wl_data.keyboard.obj);
-        wl_keyboard_add_listener (wl_data.keyboard.obj, &keyboard_listener, NULL);
+        wl_keyboard_add_listener(wl_data.keyboard.obj, &keyboard_listener, data);
         g_debug ("  - Keyboard");
     } else if (! has_keyboard && wl_data.keyboard.obj != NULL) {
         wl_keyboard_release (wl_data.keyboard.obj);
@@ -1764,8 +1800,15 @@ on_export_shm_buffer (void* data, struct wpe_fdo_shm_exported_buffer* exported_b
 
     struct shm_buffer *buffer = shm_buffer_for_resource (exported_resource);
     if (!buffer) {
-        int32_t width = wl_shm_buffer_get_width (exported_shm_buffer);
-        int32_t height = wl_shm_buffer_get_height (exported_shm_buffer);
+        int32_t width;
+        int32_t height;
+        if (win_data.is_fullscreen) {
+            width = win_data.width;
+            height = win_data.height;
+        } else {
+            width = wl_shm_buffer_get_width(exported_shm_buffer);
+            height = wl_shm_buffer_get_height(exported_shm_buffer);
+        }
         int32_t stride = wl_shm_buffer_get_stride (exported_shm_buffer);
         uint32_t format = wl_shm_buffer_get_format (exported_shm_buffer);
 
@@ -1818,7 +1861,9 @@ destroy_video_surface (gpointer data)
 {
     struct video_surface *surface = (struct video_surface*) data;
 
+#    if COG_ENABLE_WESTON_CONTENT_PROTECTION
     g_clear_pointer (&surface->protected_surface, weston_protected_surface_destroy);
+#    endif
     g_clear_pointer (&surface->wl_subsurface, wl_subsurface_destroy);
     g_clear_pointer (&surface->wl_surface, wl_surface_destroy);
     g_slice_free (struct video_surface, surface);
@@ -1851,12 +1896,14 @@ on_video_plane_display_dmabuf_receiver_handle_dmabuf (void* data, struct wpe_vid
         surf->wl_subsurface = NULL;
         surf->wl_surface = wl_compositor_create_surface (wl_data.compositor);
 
+#    if COG_ENABLE_WESTON_CONTENT_PROTECTION
         if (wl_data.protection) {
             surf->protected_surface = weston_content_protection_get_protection (wl_data.protection, surf->wl_surface);
             //weston_protected_surface_set_type(surf->protected_surface, WESTON_PROTECTED_SURFACE_TYPE_DC_ONLY);
 
             weston_protected_surface_enforce (surf->protected_surface);
         }
+#    endif
         g_hash_table_insert (win_data.video_surfaces, GUINT_TO_POINTER (id), surf);
     }
 
@@ -1969,8 +2016,11 @@ clear_wayland (void)
     g_clear_pointer (&wl_data.subcompositor, wl_subcompositor_destroy);
     g_clear_pointer (&wl_data.compositor, wl_compositor_destroy);
 
-#if COG_ENABLE_WESTON_DIRECT_DISPLAY
+#if COG_ENABLE_WESTON_CONTENT_PROTECTION
     g_clear_pointer (&wl_data.protection, weston_content_protection_destroy);
+#endif
+
+#if COG_ENABLE_WESTON_DIRECT_DISPLAY
     g_clear_pointer (&wl_data.direct_display, weston_direct_display_v1_destroy);
 #endif
 
@@ -2329,10 +2379,10 @@ update_popup (void)
 }
 
 static gboolean
-init_input (GError **error)
+init_input(CogWlPlatform *self, GError **error)
 {
     if (wl_data.seat != NULL) {
-        wl_seat_add_listener (wl_data.seat, &seat_listener, NULL);
+        wl_seat_add_listener(wl_data.seat, &seat_listener, self);
 
         xkb_data.context = xkb_context_new (XKB_CONTEXT_NO_FLAGS);
         g_assert (xkb_data.context);
@@ -2398,7 +2448,6 @@ clear_buffers(void)
 static gboolean
 cog_wl_platform_setup(CogPlatform *platform, CogShell *shell G_GNUC_UNUSED, const char *params, GError **error)
 {
-    g_assert (platform);
     g_return_val_if_fail (COG_IS_SHELL (shell), FALSE);
 
     if (!wpe_loader_init ("libWPEBackend-fdo-1.0.so")) {
@@ -2423,7 +2472,7 @@ cog_wl_platform_setup(CogPlatform *platform, CogShell *shell G_GNUC_UNUSED, cons
         return FALSE;
     }
 
-    if (!init_input(error)) {
+    if (!init_input(COG_WL_PLATFORM(platform), error)) {
         destroy_window ();
         clear_egl();
         clear_wayland ();
@@ -2522,6 +2571,7 @@ static void
 cog_wl_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
     g_signal_connect (view, "show-option-menu", G_CALLBACK (on_show_option_menu), NULL);
+    COG_WL_PLATFORM(platform)->web_view = view;
 }
 
 static WebKitInputMethodContext *

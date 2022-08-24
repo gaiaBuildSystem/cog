@@ -1,48 +1,61 @@
-=======================
-0.12.4 - March 30, 2022
-=======================
+========================
+0.14.0 - August 24, 2022
+========================
 
-- wl: Fix software rendering support.
-- x11: Fix underlinking when passing the --as-needed flag to the linker.
-
-=======================
-0.12.3 - March 23, 2022
-=======================
-
-- wl: Fixed a crash related to usage of features not available in
-  versions of interfaces negotiated with the Wayland compositor.
+- drm: Fix compiler warnings.
 
 =======================
-0.12.2 - March 23, 2022
+0.13.90 - June 29, 2022
 =======================
 
-- Fixed the location passed by CMake to the compiler with the platform
-  plug-ins to ensure it is always an absolute path.
+- cmake: Enable libsoup3 usage by default, USE_SOUP2=ON can still be specified
+  to build against libsoup2.
+- cmake: Require version 3.12, which is the same minimum as needed by WebKit.
+- cmake: Link the same wpebackend-fdo library in all components to avoid
+  crashes due to multiple copies loaded with different behaviours.
+- cmake: Fix generated .pc file when using an absolute directory for the
+  CMAKE_INSTALL_LIBDIR option instead of a relative one.
+- core: Add "Try again" button to default error pages.
+- gtk4: Fix rendering with drivers that support OpenGL 4.
+- wl: Avoid crashing due to missing callbacks by explicitly binding to
+  supported versions of Wayland protocols.
+- wl: Fix the build with COG_WESTON_DIRECT_DISPLAY enabled.
+- wl: Fix fullscreen surface dimensions when using SHM buffers.
+- wl: Add keybindings to refresh the current page (Ctrl-R, F5).
+- x11: Fix underlinking when the --as-needed linker flag is in use.
+- x11: Fix rendering in non-composited (traditional) window managers.
+- drm, gtk4, x11: Factor out and reuse the GLES textured quad painting code.
+- drm, wl, x11: Add refresh rate reporting to let WebKit pace rendering to
+  match the output device.
+
+=========================
+0.13.3 - January 12, 2022
+=========================
+
+- core: Fix platform plug-ins not being found due to COG_MODULEDIR being
+  incorrectly defined as a relative path at build configuration time.
+- gtk4: Fix handling of mouse events when teh device scale factor changes.
+- gtk4: Improve compatibility with more graphics drivers by marking shaders
+  as compatible with all GLSL versions.
+
+=========================
+0.13.2 - December 9, 2021
+=========================
+
+- launcher: Add new "--platform-params"/"-O" command line option, which
+  allows passing parameters to platforms plug-ins during initialization.
+- drm: Add support for output rotation by means of a new OpenGL ES based
+  renderer, which can be enabled with "cog -O renderer=gles,rotation=1".
+- drm: Rotate input device coordinates as needed to match output rotation.
 
 ==========================
-0.12.1 - February 24, 2022
+0.13.1 - November 26, 2021
 ==========================
 
-- wl: Fixed handling of supported Wayland protocol versions, preventing a
-  crash with certain compositors which advertise support for newer versions
-  than actually supported by the client.
-- Fixed the location used by CMake to install platform plug-ins.
-
-==========================
-0.12.0 - November 24, 2021
-==========================
-
-- This release does not contain changes over the 0.11.90 development release.
-
-===========================
-0.11.90 - November 11, 2021
-===========================
-
-- core: Removed cog_platform_teardown(), deinitilization of platform
-  plug-in implementations is now done automatically as part of object
-  finalization.
-- core: Fixed building the documentation when using libsoup3.
-- drm: Fixed two small memory leaks during initialization.
+- launcher: Support setting memory limits using command line options.
+- core: Remove CogLauncher from the library, as it is in practice an
+  implementation detail of the cog launcher.
+- cmake: Fix calculation of default installation path for platform plug-ins.
 
 =========================
 0.11.1 - November 3, 2021

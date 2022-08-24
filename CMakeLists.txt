@@ -1,9 +1,9 @@
-cmake_minimum_required (VERSION 3.3)
+cmake_minimum_required (VERSION 3.12)
 
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 include(VersioningUtils)
 
-set_project_version(0 12 4)
+set_project_version(0 14 0)
 
 # Before making a release, the LT_VERSION string should be modified.
 # The string is of the form C:R:A.
@@ -12,11 +12,13 @@ set_project_version(0 12 4)
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to C+1:0:0
 # - If the interface is the same as the previous version, change to C:R+1:A
-calculate_library_versions_from_libtool_triple(COGCORE 7 5 0)
+calculate_library_versions_from_libtool_triple(COGCORE 9 4 0)
 
 project(cog VERSION "${PROJECT_VERSION}" LANGUAGES C)
+include(CMakeDependentOption)
 include(DistTargets)
 include(GNUInstallDirs)
+include(JoinPaths)
 
 set(COG_VERSION_EXTRA "")
 if (IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
@@ -65,9 +67,10 @@ option(COG_PLATFORM_GTK4 "Build the GTK4 platform module" OFF)
 option(COG_BUILD_PROGRAMS "Build and install programs as well" ON)
 option(INSTALL_MAN_PAGES "Install the man(1) pages if COG_BUILD_PROGRAMS is enabled" ON)
 option(COG_WESTON_DIRECT_DISPLAY "Build direct display support for the Wayland platform module" OFF)
+cmake_dependent_option(COG_WESTON_CONTENT_PROTECTION "Build direct content protection for the Wayland platform module" OFF "COG_WESTON_DIRECT_DISPLAY" OFF)
 option(BUILD_DOCS "Build the documentation" OFF)
 
-option(USE_SOUP2 "Build with libsoup2 instead of libsoup3" ON)
+option(USE_SOUP2 "Build with libsoup2 instead of libsoup3" OFF)
 
 set(COG_APPID "" CACHE STRING "Default GApplication unique identifier")
 set(COG_HOME_URI "" CACHE STRING "Default home URI")
@@ -112,7 +115,6 @@ find_package(PkgConfig)
 # libcogcore
 set(COGCORE_API_HEADERS
     core/cog.h
-    core/cog-launcher.h
     core/cog-request-handler.h
     core/cog-directory-files-handler.h
     core/cog-host-routes-handler.h
@@ -126,7 +128,6 @@ set(COGCORE_API_HEADERS
     ${CMAKE_CURRENT_BINARY_DIR}/cog-config.h
 )
 set(COGCORE_SOURCES
-    core/cog-launcher.c
     core/cog-request-handler.c
     core/cog-directory-files-handler.c
     core/cog-host-routes-handler.c
@@ -154,6 +155,12 @@ endif()
 pkg_check_modules(GIO IMPORTED_TARGET REQUIRED ${REQUIRED_GIO_VERSION})
 pkg_check_modules(SOUP IMPORTED_TARGET REQUIRED ${REQUIRED_SOUP_VERSION})
 pkg_check_modules(WebKit IMPORTED_TARGET REQUIRED ${REQUIRED_WEBKIT_VERSION})
+
+if (WebKit_VERSION VERSION_GREATER_EQUAL 2.34.0)
+    set(HAVE_WEBKIT_MEM_PRESSURE_API 1)
+else()
+    set(HAVE_WEBKIT_MEM_PRESSURE_API 0)
+endif()
 
 include(CheckCCompilerFlag)
 check_c_compiler_flag(-Wall HAS_WALL)
@@ -185,32 +192,7 @@ if (HAS_WALL)
 endif ()
 
 if (COG_BUILD_PROGRAMS)
-    add_executable(cog cog.c)
-    set_property(TARGET cog PROPERTY C_STANDARD 99)
-    if (HAS_WALL)
-      target_compile_options(cog PUBLIC "-Wall")
-    endif ()
-    target_compile_definitions(cog PRIVATE G_LOG_DOMAIN=\"Cog\")
-    target_link_libraries(cog cogcore -ldl)
-
-    add_executable(cogctl cogctl.c core/cog-utils.c)
-    set_property(TARGET cogctl PROPERTY C_STANDARD 99)
-    target_compile_definitions(cogctl PRIVATE G_LOG_DOMAIN=\"Cog-Control\")
-    if (HAS_WALL)
-      target_compile_options(cogctl PUBLIC "-Wall")
-    endif ()
-    target_link_libraries(cogctl PkgConfig::GIO PkgConfig::SOUP)
-
-    install(TARGETS cog cogctl
-        DESTINATION ${CMAKE_INSTALL_BINDIR}
-        COMPONENT "runtime"
-    )
-    if (INSTALL_MAN_PAGES)
-        install(FILES data/cog.1 data/cogctl.1
-            DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
-            COMPONENT "runtime"
-        )
-    endif ()
+    add_subdirectory(launcher)
 endif ()
 
 
@@ -222,6 +204,9 @@ install(FILES ${COGCORE_API_HEADERS}
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cog
     COMPONENT "development"
 )
+
+join_paths(COG_PKGCONFIG_LIBDIR "\${prefix}" "${CMAKE_INSTALL_LIBDIR}")
+join_paths(COG_PKGCONFIG_INCLUDEDIR "\${prefix}" "${CMAKE_INSTALL_INCLUDEDIR}")
 
 configure_file(core/cog-config.h.in cog-config.h @ONLY)
 configure_file(core/cogcore.pc.in cogcore.pc @ONLY)
