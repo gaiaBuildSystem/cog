@@ -3,6 +3,7 @@ cog (0.14.0-1) UNRELEASED; urgency=medium
   * New upstream release.
   * debian/cog.lintian-overrides:
     - Update overrides.
+    - Add no-symbols-control-file override.
   * debian/control:
     - Set the debhelper compatibility level to 13.
     - Update Standards-Version to 4.6.1.0.

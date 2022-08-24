@@ -1,1 +1,2 @@
+cog: no-symbols-control-file usr/lib/*/libcogcore.so.*
 cog: package-name-doesnt-match-sonames libcogcore9
