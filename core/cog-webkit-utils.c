@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 static const char error_message_template[] =
     "<!DOCTYPE html><html><head><title>%s</title><style type='text/css'>\n"
     "html { background: #fffafa; color: #0f0f0f; }\n"
@@ -18,12 +17,14 @@ static const char error_message_template[] =
     "p { margin-left: 0.5em; margin-right: 0.5em }\n"
     "p.uri { size: 70%%; font-family: monospace; color: #888;\n"
     "        margin-left: 0.75em; margin-top: 0 }\n"
+    ".try-again { text-align: center; font-size: 1em; \n"
+    "             height: 100%%; margin: 1em; }\n"
     "</style></head><body>\n"
     "  <h3>%s</h3>\n"
     "  <p class='uri'>%s</p>\n"
     "  <p>%s</p>\n"
+    "<button onclick=\"window.location.href = '%s'\" class=\"try-again\">Try again</button>"
     "</body></html>";
-
 
 gboolean
 load_error_page (WebKitWebView *web_view,
@@ -33,11 +34,7 @@ load_error_page (WebKitWebView *web_view,
 {
     g_warning ("<%s> %s: %s", failing_uri, title, message);
 
-    g_autofree char *html = g_strdup_printf (error_message_template,
-                                             title,
-                                             title,
-                                             failing_uri,
-                                             message);
+    g_autofree char *html = g_strdup_printf(error_message_template, title, title, failing_uri, message, failing_uri);
     webkit_web_view_load_alternate_html (web_view,
                                          html,
                                          failing_uri,

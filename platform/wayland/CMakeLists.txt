@@ -24,8 +24,8 @@ add_wayland_protocol(cogplatform-wl CLIENT xdg-shell)
 pkg_check_modules(Cairo IMPORTED_TARGET cairo)
 pkg_check_modules(EGL IMPORTED_TARGET REQUIRED egl)
 pkg_check_modules(WAYLAND IMPORTED_TARGET REQUIRED wayland-client)
-pkg_check_modules(WpeFDO IMPORTED_TARGET REQUIRED wpebackend-fdo-1.0>=1.6.0)
 pkg_check_modules(XkbCommon IMPORTED_TARGET REQUIRED xkbcommon)
+find_package(WpeFDO REQUIRED)
 
 target_link_libraries(cogplatform-wl PRIVATE
     cogcore
@@ -33,9 +33,8 @@ target_link_libraries(cogplatform-wl PRIVATE
     PkgConfig::EGL
     PkgConfig::WAYLAND
     PkgConfig::WebKit
-    PkgConfig::WpeFDO
+    Wpe::FDO
 )
-
 
 pkg_check_modules(WAYLAND_EGL IMPORTED_TARGET wayland-egl)
 if (TARGET PkgConfig::WAYLAND_EGL)
@@ -57,13 +56,19 @@ if (COG_WESTON_DIRECT_DISPLAY)
         REQUIRED
     )
 
-    pkg_check_modules(LIBWESTON REQUIRED libweston-9-protocols)
-    pkg_get_variable(LIBWESTON_PKG_DATA_DIR libweston-9-protocols "pkgdatadir")
+    pkg_search_module(LIBWESTON REQUIRED libweston-11-protocols libweston-10-protocols libweston-9-protocols libweston-8-protocols)
+    pkg_get_variable(LIBWESTON_PKG_DATA_DIR ${LIBWESTON_MODULE_NAME} "pkgdatadir")
     add_wayland_protocol(cogplatform-wl CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-direct-display.xml")
-    add_wayland_protocol(cogplatform-wl CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-content-protection.xml")
     target_compile_definitions(cogplatform-wl PRIVATE COG_ENABLE_WESTON_DIRECT_DISPLAY=1)
+    if (COG_WESTON_CONTENT_PROTECTION)
+        add_wayland_protocol(cogplatform-wl CLIENT "${LIBWESTON_PKG_DATA_DIR}/weston-content-protection.xml")
+        target_compile_definitions(cogplatform-wl PRIVATE COG_ENABLE_WESTON_CONTENT_PROTECTION=1)
+    else ()
+        target_compile_definitions(cogplatform-wl PRIVATE COG_ENABLE_WESTON_CONTENT_PROTECTION=0)
+    endif ()
 else ()
     target_compile_definitions(cogplatform-wl PRIVATE COG_ENABLE_WESTON_DIRECT_DISPLAY=0)
+    target_compile_definitions(cogplatform-wl PRIVATE COG_ENABLE_WESTON_CONTENT_PROTECTION=0)
 endif ()
 
 # Optional pointer support

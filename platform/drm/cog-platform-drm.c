@@ -1,6 +1,18 @@
+/*
+ * cog-platform-x11.c
+ * Copyright (C) 2019-2022 Igalia S.L.
+ * Copyright (C) 2020 Michal Artazov <michal@artazov.cz>
+ *
+ * Distributed under terms of the MIT license.
+ */
+
 #include "../../core/cog.h"
 
+#include "cog-drm-renderer.h"
+#include "cursor-drm.h"
+#include "kms.h"
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gbm.h>
@@ -8,16 +20,13 @@
 #include <libudev.h>
 #include <string.h>
 #include <wayland-server.h>
-#include <wpe/fdo.h>
 #include <wpe/fdo-egl.h>
+#include <wpe/fdo.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include <drm_fourcc.h>
-#include "kms.h"
-#include "cursor-drm.h"
+#include <xkbcommon/xkbcommon.h>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
+#include <epoxy/egl.h>
 
 #include "../common/egl-proc-address.h"
 
@@ -26,6 +35,12 @@
         ((LIBINPUT_VER_MAJOR > (a)) || (LIBINPUT_VER_MAJOR == (a) && (LIBINPUT_VER_MINOR > (b))) || \
          (LIBINPUT_VER_MAJOR == (a) && (LIBINPUT_VER_MINOR == (b)) && (LIBINPUT_VER_MICRO >= (c))))
 #endif /* !LIBINPUT_CHECK_VERSION */
+
+#if defined(WPE_CHECK_VERSION)
+#    define HAVE_REFRESH_RATE_HANDLING WPE_CHECK_VERSION(1, 13, 2)
+#else
+#    define HAVE_REFRESH_RATE_HANDLING 0
+#endif
 
 #if !defined(EGL_EXT_platform_base)
 typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platform, void *native_display, const EGLint *attrib_list);
@@ -60,7 +75,22 @@ struct _CogDrmPlatformClass {
 };
 
 struct _CogDrmPlatform {
-    CogPlatform parent;
+    CogPlatform            parent;
+    CogDrmRenderer        *renderer;
+    CogGLRendererRotation  rotation;
+    GList                 *rotatable_input_devices;
+    bool                   use_gles;
+};
+
+enum {
+    PROP_0,
+    PROP_ROTATION,
+    PROP_RENDERER,
+    N_PROPERTIES,
+};
+
+static GParamSpec *s_properties[N_PROPERTIES] = {
+    NULL,
 };
 
 G_DECLARE_FINAL_TYPE(CogDrmPlatform, cog_drm_platform, COG, DRM_PLATFORM, CogPlatform)
@@ -71,20 +101,6 @@ G_DEFINE_DYNAMIC_TYPE_EXTENDED(
     COG_TYPE_PLATFORM,
     0,
     g_io_extension_point_implement(COG_MODULES_PLATFORM_EXTENSION_POINT, g_define_type_id, "drm", 200);)
-
-struct buffer_object {
-    struct wl_list link;
-    struct wl_listener destroy_listener;
-
-    uint32_t fb_id;
-    struct gbm_bo *bo;
-    struct wl_resource *buffer_resource;
-
-    struct  {
-        struct wl_resource* resource;
-        struct wpe_fdo_shm_exported_buffer *shm_buffer;
-    } export;
-};
 
 static struct {
     int fd;
@@ -105,40 +121,44 @@ static struct {
         uint32_t obj_id;
     } plane;
 
-    struct {
-        drmModeObjectProperties *props;
-        drmModePropertyRes **props_info;
-    } connector_props, crtc_props, plane_props;
-
     drmModeModeInfo *mode;
     drmModeEncoder *encoder;
 
     uint32_t width;
     uint32_t height;
-    double device_scale;
+    uint32_t refresh;
+    double   device_scale;
 
     bool atomic_modesetting;
     bool mode_set;
-    struct wl_list buffer_list;
-    struct buffer_object *committed_buffer;
 } drm_data = {
     .fd = -1,
     .base_resources = NULL,
     .plane_resources = NULL,
-    .connector = { NULL, 0, },
-    .crtc = { NULL, 0, 0, },
-    .plane = { NULL, 0, },
-    .connector_props = { NULL, NULL, },
-    .crtc_props = { NULL, NULL, },
-    .plane_props = { NULL, NULL, },
+    .connector =
+        {
+            NULL,
+            0,
+        },
+    .crtc =
+        {
+            NULL,
+            0,
+            0,
+        },
+    .plane =
+        {
+            NULL,
+            0,
+        },
     .mode = NULL,
     .encoder = NULL,
     .width = 0,
     .height = 0,
+    .refresh = 0,
     .device_scale = 1.0,
     .atomic_modesetting = true,
     .mode_set = false,
-    .committed_buffer = NULL,
 };
 
 static struct {
@@ -214,119 +234,85 @@ static struct {
     struct wpe_view_backend *backend;
 } wpe_view_data;
 
-
 static void
-init_config (CogShell *shell)
+init_config(CogDrmPlatform *self, CogShell *shell, const char *params_string)
 {
     drm_data.device_scale = cog_shell_get_device_scale_factor (shell);
     g_debug ("init_config: overriding device_scale value, using %.2f from shell",
              drm_data.device_scale);
 
     GKeyFile *key_file = cog_shell_get_config_file (shell);
-    if (!key_file)
-        return;
 
-    {
-        g_autoptr(GError) lookup_error = NULL;
-        gboolean value = g_key_file_get_boolean (key_file,
-                                                 "drm", "disable-atomic-modesetting",
-                                                 &lookup_error);
-        if (!lookup_error) {
-            drm_data.atomic_modesetting = !value;
-            g_debug ("init_config: atomic modesetting reconfigured to value '%s'",
-                     drm_data.atomic_modesetting ? "true" : "false");
+    if (key_file) {
+        {
+            g_autoptr(GError) lookup_error = NULL;
+
+            gboolean value = g_key_file_get_boolean(key_file, "drm", "disable-atomic-modesetting", &lookup_error);
+            if (!lookup_error) {
+                drm_data.atomic_modesetting = !value;
+                g_debug("init_config: atomic modesetting reconfigured to value '%s'",
+                        drm_data.atomic_modesetting ? "true" : "false");
+            }
+        }
+
+        {
+            g_autoptr(GError) lookup_error = NULL;
+
+            gdouble value = g_key_file_get_double(key_file, "drm", "device-scale-factor", &lookup_error);
+            if (!lookup_error) {
+                drm_data.device_scale = value;
+                g_debug("init_config: overriding device_scale value, using %.2f from config", drm_data.device_scale);
+            }
+        }
+
+        {
+            g_autofree char *value = g_key_file_get_string(key_file, "drm", "renderer", NULL);
+            if (g_strcmp0(value, "gles") == 0)
+                self->use_gles = true;
+            else if (g_strcmp0(value, "modeset") != 0)
+                self->use_gles = false;
+            else if (value)
+                g_warning("Invalid renderer '%s', using default.", value);
         }
     }
 
-    {
-        g_autoptr(GError) lookup_error = NULL;
-        gdouble value = g_key_file_get_double (key_file,
-                                               "drm", "device-scale-factor",
-                                               &lookup_error);
-        if (!lookup_error) {
-            drm_data.device_scale = value;
-            g_debug ("init_config:overriding device_scale value, using %.2f from config",
-                     drm_data.device_scale);
+    if (params_string) {
+        g_auto(GStrv) params = g_strsplit(params_string, ",", 0);
+        for (unsigned i = 0; params[i]; i++) {
+            g_auto(GStrv) kv = g_strsplit(params[i], "=", 2);
+            if (g_strv_length(kv) != 2) {
+                g_warning("Invalid parameter syntax '%s'.", params[i]);
+                continue;
+            }
+
+            const char *k = g_strstrip(kv[0]);
+            const char *v = g_strstrip(kv[1]);
+
+            if (g_strcmp0(k, "renderer") == 0) {
+                if (g_strcmp0(v, "modeset") == 0)
+                    self->use_gles = false;
+                else if (g_strcmp0(v, "gles") == 0)
+                    self->use_gles = true;
+                else
+                    g_warning("Invalid value '%s' for parameter '%s'.", v, k);
+            } else if (g_strcmp0(k, "rotation") == 0) {
+                char       *endp = NULL;
+                const char *str = v ? v : "";
+                uint64_t    val = g_ascii_strtoull(str, &endp, 10);
+                if (val > 3 || *endp != '\0')
+                    g_warning("Invalid value '%s' for parameter '%s'.", v, k);
+                else
+                    self->rotation = val;
+            } else {
+                g_warning("Invalid parameter '%s'.", k);
+            }
         }
     }
 }
-
-
-static void
-destroy_buffer (struct buffer_object *buffer)
-{
-    drmModeRmFB (drm_data.fd, buffer->fb_id);
-    gbm_bo_destroy (buffer->bo);
-
-    if (buffer->export.resource) {
-        wpe_view_backend_exportable_fdo_dispatch_release_buffer (wpe_host_data.exportable,
-                                                                 buffer->export.resource);
-        buffer->export.resource = NULL;
-    }
-#if HAVE_SHM_EXPORTED_BUFFER
-    if (buffer->export.shm_buffer) {
-        wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer (wpe_host_data.exportable,
-                                                                              buffer->export.shm_buffer);
-        buffer->export.shm_buffer = NULL;
-    }
-#endif
-    g_free (buffer);
-}
-
-static void
-destroy_buffer_notify (struct wl_listener *listener, void *data)
-{
-    struct buffer_object *buffer = wl_container_of (listener, buffer, destroy_listener);
-
-    if (drm_data.committed_buffer == buffer)
-        drm_data.committed_buffer = NULL;
-
-    wl_list_remove (&buffer->link);
-    destroy_buffer (buffer);
-}
-
-static void
-clear_buffers (void)
-{
-    drm_data.committed_buffer = NULL;
-
-    struct buffer_object *buffer, *tmp;
-    wl_list_for_each_safe (buffer, tmp, &drm_data.buffer_list, link) {
-        wl_list_remove (&buffer->link);
-        wl_list_remove (&buffer->destroy_listener.link);
-
-        destroy_buffer (buffer);
-    }
-    wl_list_init (&drm_data.buffer_list);
-}
-
 
 static void
 clear_drm (void)
 {
-    if (drm_data.connector_props.props_info) {
-        for (int i = 0; i < drm_data.connector_props.props->count_props; ++i) {
-            drmModeFreeProperty (drm_data.connector_props.props_info[i]);
-        }
-    }
-    g_clear_pointer (&drm_data.connector_props.props, drmModeFreeObjectProperties);
-    g_clear_pointer (&drm_data.connector_props.props_info, free);
-
-    if (drm_data.crtc_props.props_info) {
-        for (int i = 0; i < drm_data.crtc_props.props->count_props; ++i) {
-            drmModeFreeProperty (drm_data.crtc_props.props_info[i]);
-        }
-    }
-    g_clear_pointer (&drm_data.crtc_props.props, drmModeFreeObjectProperties);
-    g_clear_pointer (&drm_data.crtc_props.props_info, free);
-
-    if (drm_data.plane_props.props_info) {
-        for (int i = 0; i < drm_data.plane_props.props->count_props; ++i) {
-            drmModeFreeProperty (drm_data.plane_props.props_info[i]);
-        }
-    }
-    g_clear_pointer (&drm_data.plane_props.props, drmModeFreeObjectProperties);
-    g_clear_pointer (&drm_data.plane_props.props_info, free);
 
     g_clear_pointer (&drm_data.base_resources, drmModeFreeResources);
     g_clear_pointer (&drm_data.plane_resources, drmModeFreePlaneResources);
@@ -453,20 +439,23 @@ init_drm(void)
     if (!drm_data.connector.obj)
         return FALSE;
 
-    g_debug ("init_drm: using connector id %d, type %d",
-             drm_data.connector.obj->connector_id, drm_data.connector.obj->connector_type);
+    g_debug("init_drm: using connector id %d, type %d", drm_data.connector.obj->connector_id,
+            drm_data.connector.obj->connector_type);
 
-    const char* user_selected_mode = g_getenv("COG_PLATFORM_DRM_VIDEO_MODE");
+    const char *user_selected_mode = g_getenv("COG_PLATFORM_DRM_VIDEO_MODE");
 
     int user_max_width = 0;
     int user_max_height = 0;
+    int user_max_refresh = 0;
+
     const char *user_mode_max = g_getenv("COG_PLATFORM_DRM_MODE_MAX");
     if (user_mode_max) {
-        if (sscanf(user_mode_max, "%dx%d", &user_max_width, &user_max_height) != 2 ||
-            user_max_width < 0 || user_max_height < 0) {
+        if (sscanf(user_mode_max, "%dx%d@%d", &user_max_width, &user_max_height, &user_max_refresh) < 2 ||
+            user_max_width < 0 || user_max_height < 0 || user_max_refresh < 0) {
             fprintf(stderr, "invalid value for COG_PLATFORM_DRM_MODE_MAX\n");
             user_max_width = 0;
             user_max_height = 0;
+            user_max_refresh = 0;
         }
     }
 
@@ -480,6 +469,9 @@ init_drm(void)
             continue;
         }
         if (user_max_height && current_mode->vdisplay > user_max_height) {
+            continue;
+        }
+        if (user_max_refresh && current_mode->vrefresh > user_max_refresh) {
             continue;
         }
 
@@ -497,12 +489,12 @@ init_drm(void)
     if (!drm_data.mode)
         return FALSE;
 
-    g_debug ("init_drm: using mode [%ld] '%s'",
-             (drm_data.mode - drm_data.connector.obj->modes) / sizeof (drmModeModeInfo *),
-             drm_data.mode->name);
+    g_debug("init_drm: using mode [%ld] '%s' @ %dHz",
+            (drm_data.mode - drm_data.connector.obj->modes) / sizeof(drmModeModeInfo *), drm_data.mode->name,
+            drm_data.mode->vrefresh);
 
     for (int i = 0; i < drm_data.base_resources->count_encoders; ++i) {
-        drm_data.encoder = drmModeGetEncoder (drm_data.fd, drm_data.base_resources->encoders[i]);
+        drm_data.encoder = drmModeGetEncoder(drm_data.fd, drm_data.base_resources->encoders[i]);
         if (drm_data.encoder->encoder_id == drm_data.connector.obj->encoder_id)
             break;
 
@@ -562,48 +554,12 @@ init_drm(void)
             break;
     }
 
-    drm_data.connector_props.props = drmModeObjectGetProperties (drm_data.fd,
-                                                                 drm_data.connector.obj_id,
-                                                                 DRM_MODE_OBJECT_CONNECTOR);
-    if (drm_data.connector_props.props) {
-        drm_data.connector_props.props_info = calloc (drm_data.connector_props.props->count_props,
-                                                      sizeof (*drm_data.connector_props.props_info));
-        for (int i = 0; i < drm_data.connector_props.props->count_props; ++i) {
-            drm_data.connector_props.props_info[i] = drmModeGetProperty (drm_data.fd,
-                                                                         drm_data.connector_props.props->props[i]);
-        }
-    }
-
-    drm_data.crtc_props.props = drmModeObjectGetProperties (drm_data.fd,
-                                                            drm_data.crtc.obj_id,
-                                                            DRM_MODE_OBJECT_CRTC);
-    if (drm_data.crtc_props.props) {
-        drm_data.crtc_props.props_info = calloc (drm_data.crtc_props.props->count_props,
-                                                 sizeof (*drm_data.crtc_props.props_info));
-        for (int i = 0; i < drm_data.crtc_props.props->count_props; ++i) {
-            drm_data.crtc_props.props_info[i] = drmModeGetProperty (drm_data.fd,
-                                                                    drm_data.crtc_props.props->props[i]);
-        }
-    }
-
-    drm_data.plane_props.props = drmModeObjectGetProperties (drm_data.fd,
-                                                             drm_data.plane.obj_id,
-                                                             DRM_MODE_OBJECT_PLANE);
-    if (drm_data.plane_props.props) {
-        drm_data.plane_props.props_info = calloc (drm_data.plane_props.props->count_props,
-                                                  sizeof (*drm_data.plane_props.props_info));
-        for (int i = 0; i < drm_data.plane_props.props->count_props; ++i) {
-            drm_data.plane_props.props_info[i] = drmModeGetProperty (drm_data.fd,
-                                                                     drm_data.plane_props.props->props[i]);
-        }
-    }
-
     drm_data.width = drm_data.mode->hdisplay;
     drm_data.height = drm_data.mode->vdisplay;
-    wl_list_init (&drm_data.buffer_list);
+    drm_data.refresh = drm_data.mode->vrefresh;
 
-    g_clear_pointer (&drm_data.base_resources, drmModeFreeResources);
-    g_clear_pointer (&drm_data.plane_resources, drmModeFreePlaneResources);
+    g_clear_pointer(&drm_data.base_resources, drmModeFreeResources);
+    g_clear_pointer(&drm_data.plane_resources, drmModeFreePlaneResources);
 
     return TRUE;
 }
@@ -679,315 +635,6 @@ init_cursor (void)
 }
 
 static void
-drm_page_flip_handler (int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data)
-{
-    if (drm_data.committed_buffer) {
-        struct buffer_object* buffer = drm_data.committed_buffer;
-
-        if (buffer->export.resource) {
-            wpe_view_backend_exportable_fdo_dispatch_release_buffer (wpe_host_data.exportable,
-                                                                     buffer->export.resource);
-            buffer->export.resource = NULL;
-        }
-#if HAVE_SHM_EXPORTED_BUFFER
-        if (buffer->export.shm_buffer) {
-            wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer (wpe_host_data.exportable,
-                                                                                  buffer->export.shm_buffer);
-            buffer->export.shm_buffer = NULL;
-        }
-#endif
-    }
-    drm_data.committed_buffer = (struct buffer_object *) data;
-
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete (wpe_host_data.exportable);
-}
-
-static struct buffer_object *
-drm_buffer_for_resource (struct wl_resource *buffer_resource)
-{
-    struct buffer_object *buffer;
-    wl_list_for_each (buffer, &drm_data.buffer_list, link) {
-        if (buffer->buffer_resource == buffer_resource)
-            return buffer;
-    }
-
-    return NULL;
-}
-
-static struct buffer_object *
-drm_create_buffer_for_bo (struct gbm_bo *bo, struct wl_resource *buffer_resource, uint32_t width, uint32_t height, uint32_t format)
-{
-    uint32_t in_handles[4] = { 0, };
-    uint32_t in_strides[4] = { 0, };
-    uint32_t in_offsets[4] = { 0, };
-    uint64_t in_modifiers[4] = { 0, };
-
-    in_modifiers[0] = gbm_bo_get_modifier (bo);
-
-    int plane_count = MIN (gbm_bo_get_plane_count (bo), 4);
-    for (int i = 0; i < plane_count; ++i) {
-        in_handles[i] = gbm_bo_get_handle_for_plane (bo, i).u32;
-        in_strides[i] = gbm_bo_get_stride_for_plane (bo, i);
-        in_offsets[i] = gbm_bo_get_offset (bo, i);
-        in_modifiers[i] = in_modifiers[0];
-    }
-
-    int flags = 0;
-    if (in_modifiers[0])
-        flags = DRM_MODE_FB_MODIFIERS;
-
-    uint32_t fb_id = 0;
-    int ret = drmModeAddFB2WithModifiers (drm_data.fd, width, height, format,
-                                          in_handles, in_strides, in_offsets, in_modifiers,
-                                          &fb_id, flags);
-    if (ret) {
-        in_handles[0] = gbm_bo_get_handle (bo).u32;
-        in_handles[1] = in_handles[2] = in_handles[3] = 0;
-        in_strides[0] = gbm_bo_get_stride (bo);
-        in_strides[1] = in_strides[2] = in_strides[3] = 0;
-        in_offsets[0] = in_offsets[1] = in_offsets[2] = in_offsets[3] = 0;
-
-        ret = drmModeAddFB2 (drm_data.fd, width, height, format,
-                             in_handles, in_strides, in_offsets,
-                             &fb_id, 0);
-    }
-
-    if (ret) {
-        g_warning ("failed to create framebuffer: %s", strerror (errno));
-        return NULL;
-    }
-
-    struct buffer_object *buffer = g_new0 (struct buffer_object, 1);
-    wl_list_insert (&drm_data.buffer_list, &buffer->link);
-    buffer->destroy_listener.notify = destroy_buffer_notify;
-    wl_resource_add_destroy_listener (buffer_resource, &buffer->destroy_listener);
-
-    buffer->fb_id = fb_id;
-    buffer->bo = bo;
-    buffer->buffer_resource = buffer_resource;
-
-    return buffer;
-}
-
-#if HAVE_SHM_EXPORTED_BUFFER
-static struct buffer_object *
-drm_create_buffer_for_shm_buffer (struct wl_resource *buffer_resource, struct wl_shm_buffer *shm_buffer)
-{
-    uint32_t format = wl_shm_buffer_get_format (shm_buffer);
-    if (format != WL_SHM_FORMAT_ARGB8888 && format != WL_SHM_FORMAT_XRGB8888) {
-        g_warning ("failed to handle non-32-bit ARGB/XRGB format");
-        return NULL;
-    }
-
-    int32_t width = wl_shm_buffer_get_width (shm_buffer);
-    int32_t height = wl_shm_buffer_get_height (shm_buffer);
-
-    // TODO: don't ignore the alpha channel in case of ARGB8888 SHM data
-    uint32_t gbm_format = GBM_FORMAT_XRGB8888;
-    struct gbm_bo *bo = gbm_bo_create (gbm_data.device, width, height, gbm_format,
-                                       GBM_BO_USE_SCANOUT | GBM_BO_USE_WRITE);
-    if (!bo) {
-        g_warning ("failed to create a gbm_bo object");
-        return NULL;
-    }
-
-    uint32_t in_handles[4] = { 0, };
-    uint32_t in_strides[4] = { 0, };
-    uint32_t in_offsets[4] = { 0, };
-    in_handles[0] = gbm_bo_get_handle (bo).u32;
-    in_strides[0] = gbm_bo_get_stride (bo);
-
-    uint32_t fb_id = 0;
-    int ret = drmModeAddFB2 (drm_data.fd, width, height, gbm_format,
-                             in_handles, in_strides, in_offsets,
-                             &fb_id, 0);
-    if (ret) {
-        gbm_bo_destroy (bo);
-        g_warning ("failed to create framebuffer: %s", strerror (errno));
-        return NULL;
-    }
-
-    struct buffer_object *buffer = g_new0 (struct buffer_object, 1);
-    wl_list_insert (&drm_data.buffer_list, &buffer->link);
-    buffer->destroy_listener.notify = destroy_buffer_notify;
-    wl_resource_add_destroy_listener (buffer_resource, &buffer->destroy_listener);
-
-    buffer->fb_id = fb_id;
-    buffer->bo = bo;
-    buffer->buffer_resource = buffer_resource;
-
-    return buffer;
-}
-
-static void
-drm_copy_shm_buffer_into_bo (struct wl_shm_buffer *shm_buffer, struct gbm_bo *bo)
-{
-    int32_t width = wl_shm_buffer_get_width (shm_buffer);
-    int32_t height = wl_shm_buffer_get_height (shm_buffer);
-    int32_t stride = wl_shm_buffer_get_stride (shm_buffer);
-
-    uint32_t bo_stride = 0;
-    void *map_data = NULL;
-    gbm_bo_map (bo, 0, 0, width, height, GBM_BO_TRANSFER_WRITE, &bo_stride, &map_data);
-    if (!map_data)
-        return;
-
-    wl_shm_buffer_begin_access (shm_buffer);
-
-    uint8_t *src = wl_shm_buffer_get_data (shm_buffer);
-    uint8_t *dst = map_data;
-
-    uint32_t bo_width = gbm_bo_get_width (bo);
-    uint32_t bo_height = gbm_bo_get_height (bo);
-    if (!(width == bo_width && height == bo_height && stride == bo_stride)) {
-        for (uint32_t y = 0; y < height; ++y) {
-            for (uint32_t x = 0; x < width; ++x) {
-                dst[bo_stride * y + 4 * x + 0] = src[stride * y + 4 * x + 0];
-                dst[bo_stride * y + 4 * x + 1] = src[stride * y + 4 * x + 1];
-                dst[bo_stride * y + 4 * x + 2] = src[stride * y + 4 * x + 2];
-                dst[bo_stride * y + 4 * x + 3] = src[stride * y + 4 * x + 3];
-            }
-        }
-    } else
-        memcpy (dst, src, stride * height);
-
-    wl_shm_buffer_end_access (shm_buffer);
-    gbm_bo_unmap (bo, map_data);
-}
-#endif
-
-static int
-add_property (drmModeObjectProperties *props, drmModePropertyRes **props_info, drmModeAtomicReq *req, uint32_t obj_id, const char *name, uint64_t value)
-{
-    for (int i = 0; i < props->count_props; ++i) {
-        if (!g_strcmp0 (props_info[i]->name, name)) {
-            int ret = drmModeAtomicAddProperty (req, obj_id, props_info[i]->prop_id, value);
-            return (ret > 0) ? 0 : -1;
-        }
-    }
-
-    return -1;
-}
-
-static int
-add_connector_property (drmModeAtomicReq *req, uint32_t obj_id, const char *name, uint64_t value)
-{
-    return add_property (drm_data.connector_props.props,
-                         drm_data.connector_props.props_info,
-                         req, obj_id, name, value);
-}
-
-static int
-add_crtc_property (drmModeAtomicReq *req, uint32_t obj_id, const char *name, uint64_t value)
-{
-    return add_property (drm_data.crtc_props.props,
-                         drm_data.crtc_props.props_info,
-                         req, obj_id, name, value);
-}
-
-static int
-add_plane_property (drmModeAtomicReq *req, uint32_t obj_id, const char *name, uint64_t value)
-{
-    return add_property (drm_data.plane_props.props,
-                         drm_data.plane_props.props_info,
-                         req, obj_id, name, value);
-}
-
-static int
-drm_commit_buffer_nonatomic (struct buffer_object *buffer)
-{
-    if (!drm_data.mode_set) {
-        int ret = drmModeSetCrtc (drm_data.fd, drm_data.crtc.obj_id, buffer->fb_id, 0, 0,
-                                  &drm_data.connector.obj_id, 1, drm_data.mode);
-        if (ret)
-            return -1;
-
-        drm_data.mode_set = true;
-    }
-
-    return drmModePageFlip (drm_data.fd, drm_data.crtc.obj_id, buffer->fb_id,
-                            DRM_MODE_PAGE_FLIP_EVENT, buffer);
-}
-
-static int
-drm_commit_buffer_atomic (struct buffer_object *buffer)
-{
-    int ret = 0;
-    uint32_t flags = DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK;
-
-    drmModeAtomicReq *req = drmModeAtomicAlloc ();
-
-    if (!drm_data.mode_set) {
-        flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-
-        uint32_t blob_id;
-        ret = drmModeCreatePropertyBlob (drm_data.fd, drm_data.mode, sizeof (*drm_data.mode), &blob_id);
-        if (ret) {
-            drmModeAtomicFree (req);
-            return -1;
-        }
-
-        ret |= add_connector_property (req, drm_data.connector.obj_id, "CRTC_ID", drm_data.crtc.obj_id);
-        ret |= add_crtc_property (req, drm_data.crtc.obj_id, "MODE_ID", blob_id);
-        ret |= add_crtc_property (req, drm_data.crtc.obj_id, "ACTIVE", 1);
-        if (ret) {
-            drmModeAtomicFree (req);
-            return -1;
-        }
-
-        drm_data.mode_set = true;
-    }
-
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "FB_ID", buffer->fb_id);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "CRTC_ID", drm_data.crtc.obj_id);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "SRC_X", 0);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "SRC_Y", 0);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "SRC_W", ((uint64_t) drm_data.width) << 16);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "SRC_H", ((uint64_t) drm_data.height) << 16);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "CRTC_X", 0);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "CRTC_Y", 0);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "CRTC_W", drm_data.width);
-    ret |= add_plane_property (req, drm_data.plane.obj_id,
-                               "CRTC_H", drm_data.height);
-    if (ret) {
-        drmModeAtomicFree (req);
-        return -1;
-    }
-
-    ret = drmModeAtomicCommit (drm_data.fd, req, flags, buffer);
-    if (ret) {
-        drmModeAtomicFree (req);
-        return -1;
-    }
-
-    drmModeAtomicFree (req);
-    return 0;
-}
-
-static void
-drm_commit_buffer (struct buffer_object *buffer)
-{
-    int ret;
-    if (drm_data.atomic_modesetting)
-        ret = drm_commit_buffer_atomic (buffer);
-    else
-        ret = drm_commit_buffer_nonatomic (buffer);
-
-    if (ret)
-        g_warning ("failed to schedule a page flip: %s", strerror (errno));
-}
-
-
-static void
 clear_gbm (void)
 {
     g_clear_pointer (&gbm_data.device, gbm_device_destroy);
@@ -1022,7 +669,7 @@ init_egl (void)
     if (s_eglGetPlatformDisplay)
         egl_data.display = s_eglGetPlatformDisplay (EGL_PLATFORM_GBM_KHR, gbm_data.device, NULL);
     else
-        egl_data.display = eglGetDisplay (gbm_data.device);
+        egl_data.display = eglGetDisplay((NativeDisplayType *) gbm_data.device);
 
     if (!egl_data.display) {
         clear_egl ();
@@ -1308,6 +955,44 @@ input_handle_pointer_axis_event(struct libinput_event_pointer *pointer_event)
 }
 #endif /* !LIBINPUT_CHECK_VERSION(1, 19, 0) */
 
+static bool
+input_device_needs_config(struct libinput_device *device)
+{
+    static const enum libinput_device_capability device_caps[] = {
+        LIBINPUT_DEVICE_CAP_GESTURE,     LIBINPUT_DEVICE_CAP_POINTER, LIBINPUT_DEVICE_CAP_TABLET_PAD,
+        LIBINPUT_DEVICE_CAP_TABLET_TOOL, LIBINPUT_DEVICE_CAP_TOUCH,
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(device_caps); i++)
+        if (libinput_device_has_capability(device, device_caps[i]))
+            return !!libinput_device_config_rotation_is_available(device);
+
+    return false;
+}
+
+static void
+input_configure_device(struct libinput_device *device, CogDrmPlatform *platform)
+{
+    enum libinput_config_status status = libinput_device_config_rotation_set_angle(device, platform->rotation * 90);
+
+    const char *name = libinput_device_get_name(device);
+    const int   id_vendor = libinput_device_get_id_vendor(device);
+    const int   id_product = libinput_device_get_id_product(device);
+
+    switch (status) {
+    case LIBINPUT_CONFIG_STATUS_SUCCESS:
+        g_debug("%s: Rotation set for %s (%04x:%04x)", __func__, name, id_vendor, id_product);
+        break;
+    case LIBINPUT_CONFIG_STATUS_UNSUPPORTED:
+        g_debug("%s: Rotation unsupported for %s (%04x:%04x)", __func__, name, id_vendor, id_product);
+        break;
+    case LIBINPUT_CONFIG_STATUS_INVALID:
+        g_debug("%s: Rotation %u invalid for %s (%04x:%04x)", __func__, platform->rotation * 90, name, id_vendor,
+                id_product);
+        break;
+    }
+}
+
 static void
 input_handle_device_added(struct libinput_device *device)
 {
@@ -1316,6 +1001,13 @@ input_handle_device_added(struct libinput_device *device)
             libinput_device_get_name(device),
             libinput_device_get_id_vendor(device),
             libinput_device_get_id_product(device));
+
+    if (input_device_needs_config(device)) {
+        CogDrmPlatform *platform = libinput_get_user_data(libinput_device_get_context(device));
+        platform->rotatable_input_devices =
+            g_list_append(platform->rotatable_input_devices, libinput_device_ref(device));
+        input_configure_device(device, platform);
+    }
 }
 
 static void
@@ -1326,6 +1018,14 @@ input_handle_device_removed(struct libinput_device *device)
             libinput_device_get_name(device),
             libinput_device_get_id_vendor(device),
             libinput_device_get_id_product(device));
+
+    CogDrmPlatform *platform = libinput_get_user_data(libinput_device_get_context(device));
+
+    GList *item = g_list_find(platform->rotatable_input_devices, device);
+    if (item) {
+        platform->rotatable_input_devices = g_list_remove_link(platform->rotatable_input_devices, item);
+        g_list_free_full(item, (GDestroyNotify) libinput_device_unref);
+    }
 }
 
 static void
@@ -1447,6 +1147,8 @@ input_process_events (void)
             input_handle_pointer_axis_event(libinput_event_get_pointer_event(event));
             break;
 #endif /* LIBINPUT_CHECK_VERSION(1, 19, 0) */
+        default:
+            break;
         }
 
         libinput_event_destroy (event);
@@ -1466,14 +1168,18 @@ input_interface_close_restricted (int fd, void *user_data)
 }
 
 static void
-clear_input (void)
+clear_input(CogDrmPlatform *platform)
 {
+    if (platform->rotatable_input_devices) {
+        g_list_free_full(platform->rotatable_input_devices, (GDestroyNotify) libinput_device_unref);
+        platform->rotatable_input_devices = NULL;
+    }
     g_clear_pointer (&input_data.libinput, libinput_unref);
     g_clear_pointer (&input_data.udev, udev_unref);
 }
 
 static gboolean
-init_input (void)
+init_input(CogDrmPlatform *platform)
 {
     static struct libinput_interface interface = {
         .open_restricted = input_interface_open_restricted,
@@ -1484,9 +1190,7 @@ init_input (void)
     if (!input_data.udev)
         return FALSE;
 
-    input_data.libinput = libinput_udev_create_context (&interface,
-                                                        NULL,
-                                                        input_data.udev);
+    input_data.libinput = libinput_udev_create_context(&interface, platform, input_data.udev);
     if (!input_data.libinput)
         return FALSE;
 
@@ -1513,27 +1217,6 @@ struct drm_source {
     GPollFD pfd;
     drmEventContext event_context;
 };
-
-static gboolean
-drm_source_check (GSource *base)
-{
-    struct drm_source *source = (struct drm_source *) base;
-    return !!source->pfd.revents;
-}
-
-static gboolean
-drm_source_dispatch (GSource *base, GSourceFunc callback, gpointer user_data)
-{
-    struct drm_source *source = (struct drm_source *) base;
-    if (source->pfd.revents & (G_IO_ERR | G_IO_HUP))
-        return FALSE;
-
-    if (source->pfd.revents & G_IO_IN)
-        drmHandleEvent (drm_data.fd, &source->event_context);
-    source->pfd.revents = 0;
-    return TRUE;
-}
-
 
 struct input_source {
     GSource source;
@@ -1594,11 +1277,6 @@ clear_glib (void)
 static gboolean
 init_glib (void)
 {
-    static GSourceFuncs drm_source_funcs = {
-        .check = drm_source_check,
-        .dispatch = drm_source_dispatch,
-    };
-
     static GSourceFuncs input_source_funcs = {
         .check = input_source_check,
         .dispatch = input_source_dispatch,
@@ -1607,24 +1285,6 @@ init_glib (void)
     static GSourceFuncs key_repeat_source_funcs = {
         .dispatch = key_repeat_source_dispatch,
     };
-
-    glib_data.drm_source = g_source_new (&drm_source_funcs,
-                                         sizeof (struct drm_source));
-    {
-        struct drm_source *source = (struct drm_source *) glib_data.drm_source;
-        memset (&source->event_context, 0, sizeof (drmEventContext));
-        source->event_context.version = DRM_EVENT_CONTEXT_VERSION;
-        source->event_context.page_flip_handler = drm_page_flip_handler;
-
-        source->pfd.fd = drm_data.fd;
-        source->pfd.events = G_IO_IN | G_IO_ERR | G_IO_HUP;
-        source->pfd.revents = 0;
-        g_source_add_poll (glib_data.drm_source, &source->pfd);
-
-        g_source_set_name (glib_data.drm_source, "cog: drm");
-        g_source_set_can_recurse (glib_data.drm_source, TRUE);
-        g_source_attach (glib_data.drm_source, g_main_context_get_thread_default ());
-    }
 
     glib_data.input_source = g_source_new (&input_source_funcs,
                                            sizeof (struct input_source));
@@ -1649,100 +1309,6 @@ init_glib (void)
     return TRUE;
 }
 
-
-static void
-on_export_buffer_resource (void *data, struct wl_resource *buffer_resource)
-{
-    struct buffer_object *buffer = drm_buffer_for_resource (buffer_resource);
-    if (buffer) {
-        buffer->export.resource = buffer_resource;
-        drm_commit_buffer (buffer);
-        return;
-    }
-
-    struct gbm_bo* bo = gbm_bo_import (gbm_data.device, GBM_BO_IMPORT_WL_BUFFER,
-                                       (void *) buffer_resource, GBM_BO_USE_SCANOUT);
-    if (!bo) {
-        g_warning ("failed to import a wl_buffer resource into gbm_bo");
-        return;
-    }
-
-    uint32_t width = gbm_bo_get_width (bo);
-    uint32_t height = gbm_bo_get_height (bo);
-    uint32_t format = gbm_bo_get_format (bo);
-
-    buffer = drm_create_buffer_for_bo (bo, buffer_resource, width, height, format);
-    if (buffer) {
-        buffer->export.resource = buffer_resource;
-        drm_commit_buffer (buffer);
-    }
-}
-
-static void
-on_export_dmabuf_resource (void *data, struct wpe_view_backend_exportable_fdo_dmabuf_resource *dmabuf_resource)
-{
-    struct buffer_object *buffer = drm_buffer_for_resource (dmabuf_resource->buffer_resource);
-    if (buffer) {
-        buffer->export.resource = dmabuf_resource->buffer_resource;
-        drm_commit_buffer (buffer);
-        return;
-    }
-
-    struct gbm_import_fd_modifier_data modifier_data = {
-        .width = dmabuf_resource->width,
-        .height = dmabuf_resource->height,
-        .format = dmabuf_resource->format,
-        .num_fds = dmabuf_resource->n_planes,
-        .modifier = dmabuf_resource->modifiers[0],
-    };
-    for (uint32_t i = 0; i < modifier_data.num_fds; ++i) {
-        modifier_data.fds[i] = dmabuf_resource->fds[i];
-        modifier_data.strides[i] = dmabuf_resource->strides[i];
-        modifier_data.offsets[i] = dmabuf_resource->offsets[i];
-    }
-
-    struct gbm_bo *bo = gbm_bo_import (gbm_data.device, GBM_BO_IMPORT_FD_MODIFIER,
-                                       (void *)(&modifier_data), GBM_BO_USE_SCANOUT);
-    if (!bo) {
-        g_warning ("failed to import a dma-buf resource into gbm_bo");
-        return;
-    }
-
-    buffer = drm_create_buffer_for_bo (bo, dmabuf_resource->buffer_resource,
-                                       dmabuf_resource->width, dmabuf_resource->height,
-                                       dmabuf_resource->format);
-    if (buffer) {
-        buffer->export.resource = dmabuf_resource->buffer_resource;
-        drm_commit_buffer (buffer);
-    }
-}
-
-#if HAVE_SHM_EXPORTED_BUFFER
-static void
-on_export_shm_buffer (void* data, struct wpe_fdo_shm_exported_buffer *exported_buffer)
-{
-    struct wl_resource *exported_resource = wpe_fdo_shm_exported_buffer_get_resource (exported_buffer);
-    struct wl_shm_buffer *exported_shm_buffer = wpe_fdo_shm_exported_buffer_get_shm_buffer (exported_buffer);
-
-    struct buffer_object *buffer = drm_buffer_for_resource (exported_resource);
-    if (buffer) {
-        drm_copy_shm_buffer_into_bo (exported_shm_buffer, buffer->bo);
-
-        buffer->export.shm_buffer = exported_buffer;
-        drm_commit_buffer (buffer);
-        return;
-    }
-
-    buffer = drm_create_buffer_for_shm_buffer (exported_resource, exported_shm_buffer);
-    if (buffer) {
-        drm_copy_shm_buffer_into_bo (exported_shm_buffer, buffer->bo);
-
-        buffer->export.shm_buffer = exported_buffer;
-        drm_commit_buffer (buffer);
-    }
-}
-#endif
-
 static void *
 check_supported(void *data G_GNUC_UNUSED)
 {
@@ -1765,7 +1331,9 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
     g_assert (platform);
     g_return_val_if_fail (COG_IS_SHELL (shell), FALSE);
 
-    init_config (shell);
+    CogDrmPlatform *self = COG_DRM_PLATFORM(platform);
+
+    init_config(COG_DRM_PLATFORM(platform), shell, params);
 
     if (!wpe_loader_init ("libWPEBackend-fdo-1.0.so")) {
         g_set_error_literal (error,
@@ -1805,7 +1373,31 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
         return FALSE;
     }
 
-    if (!init_input ()) {
+    if (self->use_gles) {
+        self->renderer = cog_drm_gles_renderer_new(gbm_data.device,
+                                                   egl_data.display,
+                                                   drm_data.plane.obj_id,
+                                                   drm_data.crtc.obj_id,
+                                                   drm_data.connector.obj_id,
+                                                   drm_data.mode,
+                                                   drm_data.atomic_modesetting);
+    } else {
+        self->renderer = cog_drm_modeset_renderer_new(gbm_data.device,
+                                                      drm_data.plane.obj_id,
+                                                      drm_data.crtc.obj_id,
+                                                      drm_data.connector.obj_id,
+                                                      drm_data.mode,
+                                                      drm_data.atomic_modesetting);
+    }
+    if (cog_drm_renderer_supports_rotation(self->renderer, self->rotation)) {
+        cog_drm_renderer_set_rotation(self->renderer, self->rotation);
+    } else {
+        g_warning("Renderer '%s' does not support rotation %u (%u degrees).", self->renderer->name, self->rotation,
+                  self->rotation * 90);
+        self->rotation = COG_GL_RENDERER_ROTATION_0;
+    }
+
+    if (!init_input(COG_DRM_PLATFORM(platform))) {
         g_set_error_literal (error,
                              COG_PLATFORM_WPE_ERROR,
                              COG_PLATFORM_WPE_ERROR_INIT,
@@ -1821,6 +1413,12 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
         return FALSE;
     }
 
+    if (self->renderer->initialize) {
+        if (!self->renderer->initialize(self->renderer, error))
+            return FALSE;
+    }
+    g_debug("%s: Renderer '%s' initialized.", __func__, self->renderer->name);
+
     wpe_fdo_initialize_for_egl_display (egl_data.display);
 
     return TRUE;
@@ -1829,13 +1427,18 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
 static void
 cog_drm_platform_finalize(GObject *object)
 {
-    clear_buffers ();
-    clear_glib ();
-    clear_input ();
-    clear_egl ();
-    clear_gbm ();
-    clear_cursor ();
-    clear_drm ();
+    CogDrmPlatform *self = COG_DRM_PLATFORM(object);
+
+    g_idle_remove_by_data(&wpe_view_data);
+
+    g_clear_pointer(&self->renderer, cog_drm_renderer_destroy);
+
+    clear_glib();
+    clear_input(self);
+    clear_egl();
+    clear_gbm();
+    clear_cursor();
+    clear_drm();
 
     G_OBJECT_CLASS(cog_drm_platform_parent_class)->finalize(object);
 }
@@ -1843,18 +1446,10 @@ cog_drm_platform_finalize(GObject *object)
 static WebKitWebViewBackend *
 cog_drm_platform_get_view_backend(CogPlatform *platform, WebKitWebView *related_view, GError **error)
 {
-    static struct wpe_view_backend_exportable_fdo_client exportable_client = {
-        .export_buffer_resource = on_export_buffer_resource,
-        .export_dmabuf_resource = on_export_dmabuf_resource,
-#if HAVE_SHM_EXPORTED_BUFFER
-        .export_shm_buffer = on_export_shm_buffer,
-#endif
-    };
-
-    wpe_host_data.exportable = wpe_view_backend_exportable_fdo_create (&exportable_client,
-                                                                       NULL,
-                                                                       drm_data.width / drm_data.device_scale,
-                                                                       drm_data.height / drm_data.device_scale);
+    CogDrmPlatform *self = COG_DRM_PLATFORM(platform);
+    wpe_host_data.exportable = self->renderer->create_exportable(self->renderer,
+                                                                 drm_data.width / drm_data.device_scale,
+                                                                 drm_data.height / drm_data.device_scale);
     g_assert (wpe_host_data.exportable);
 
     wpe_view_data.backend = wpe_view_backend_exportable_fdo_get_view_backend (wpe_host_data.exportable);
@@ -1869,11 +1464,76 @@ cog_drm_platform_get_view_backend(CogPlatform *platform, WebKitWebView *related_
     return wk_view_backend;
 }
 
+#if HAVE_REFRESH_RATE_HANDLING
+static gboolean
+set_target_refresh_rate(gpointer user_data)
+{
+    wpe_view_backend_set_target_refresh_rate(wpe_view_data.backend, drm_data.refresh * 1000);
+    return G_SOURCE_REMOVE;
+}
+#endif /* HAVE_REFRESH_RATE_HANDLING */
+
 static void
 cog_drm_platform_init_web_view(CogPlatform *platform, WebKitWebView *view)
 {
-    wpe_view_backend_dispatch_set_device_scale_factor (wpe_view_data.backend,
-                                                       drm_data.device_scale);
+    wpe_view_backend_dispatch_set_device_scale_factor(wpe_view_data.backend, drm_data.device_scale);
+
+#if HAVE_REFRESH_RATE_HANDLING
+    g_idle_add(G_SOURCE_FUNC(set_target_refresh_rate), &wpe_view_data);
+#endif /* HAVE_REFRESH_RATE_HANDLING */
+}
+
+static void
+cog_drm_platform_set_property(GObject *object, unsigned prop_id, const GValue *value, GParamSpec *pspec)
+{
+    CogDrmPlatform *self = COG_DRM_PLATFORM(object);
+    switch (prop_id) {
+    case PROP_ROTATION: {
+        CogGLRendererRotation rotation = g_value_get_uint(value);
+        if (rotation == self->rotation)
+            return;
+
+        if (!self->renderer) {
+            self->rotation = rotation;
+        } else if (cog_drm_renderer_set_rotation(self->renderer, rotation)) {
+            self->rotation = rotation;
+            if (self->rotatable_input_devices)
+                g_list_foreach(self->rotatable_input_devices, (GFunc) input_configure_device, self);
+        } else {
+            g_critical("%s: Could not set %u rotation (%u degrees), unsupported", __func__, rotation, rotation * 90);
+        }
+        break;
+    }
+    case PROP_RENDERER: {
+        const char *name = g_value_get_string(value);
+        if (g_strcmp0(name, "modeset") == 0) {
+            self->use_gles = false;
+        } else if (g_strcmp0(name, "gles") == 0) {
+            self->use_gles = true;
+        } else {
+            g_warning("%s: Invalid renderer name '%s'.", __func__, name);
+        }
+        break;
+    }
+    default:
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+    }
+}
+
+static void
+cog_drm_platform_get_property(GObject *object, unsigned prop_id, GValue *value, GParamSpec *pspec)
+{
+    CogDrmPlatform *self = COG_DRM_PLATFORM(object);
+    switch (prop_id) {
+    case PROP_ROTATION:
+        g_value_set_uint(value, self->rotation);
+        break;
+    case PROP_RENDERER:
+        g_value_set_string(value, self->use_gles ? "gles" : "modeset");
+        break;
+    default:
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+    }
 }
 
 static void
@@ -1881,12 +1541,49 @@ cog_drm_platform_class_init(CogDrmPlatformClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     object_class->finalize = cog_drm_platform_finalize;
+    object_class->set_property = cog_drm_platform_set_property;
+    object_class->get_property = cog_drm_platform_get_property;
 
     CogPlatformClass *platform_class = COG_PLATFORM_CLASS(klass);
     platform_class->is_supported = cog_drm_platform_is_supported;
     platform_class->setup = cog_drm_platform_setup;
     platform_class->get_view_backend = cog_drm_platform_get_view_backend;
     platform_class->init_web_view = cog_drm_platform_init_web_view;
+
+    /**
+     * CogDrmPlatform:rotation:
+     *
+     * Rotation applied to the output. The value is the number of 90 degree
+     * increments applied counter-clockwise, which means the possible values
+     * are:
+     *
+     * - `0`: No rotation.
+     * - `1`: 90 degrees.
+     * - `2`: 180 degrees.
+     * - `3`: 270 degrees..
+     */
+    s_properties[PROP_ROTATION] =
+        g_param_spec_uint("rotation", "Output rotation", "Number of counter-clockwise 90 degree rotation increments", 0,
+                          3, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+    /** CogDrmPlatform:renderer:
+     *
+     * Mechanism used to present the output. Possible values are:
+     *
+     * - `modeset`: Present content by attaching rendered buffers to a
+     *   KMS plane. Does not support rotation at the moment.
+     * - `gles`: Use OpenGL ES to present content by drawing quads textured
+     *   with the contents of rendered buffers. Supports all rotations by
+     *   modifying the texture UV-mapping.
+     */
+    s_properties[PROP_RENDERER] =
+        g_param_spec_string("renderer",
+                            "Output renderer",
+                            "Mechanism used to produce output on the screen",
+                            "modeset",
+                            G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
+
+    g_object_class_install_properties(object_class, N_PROPERTIES, s_properties);
 }
 
 static void

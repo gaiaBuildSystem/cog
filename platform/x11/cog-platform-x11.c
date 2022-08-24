@@ -1,16 +1,11 @@
 /*
  * cog-platform-x11.c
- * Copyright (C) 2020-2021 Igalia S.L.
+ * Copyright (C) 2020-2022 Igalia S.L.
  *
  * Distributed under terms of the MIT license.
  */
 
 #include "../../core/cog.h"
-
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -24,28 +19,18 @@
 #include <X11/Xlib.h>
 #include <X11/Xlib-xcb.h>
 
+#include "../common/cog-gl-utils.h"
 #include "../common/egl-proc-address.h"
 
 
 #ifndef EGL_EXT_platform_base
 #define EGL_EXT_platform_base 1
 typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platform, void *native_display, const EGLint *attrib_list);
-typedef EGLSurface (EGLAPIENTRYP PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC) (EGLDisplay dpy, EGLConfig config, void *native_window, const EGLint *attrib_list);
-typedef EGLSurface (EGLAPIENTRYP PFNEGLCREATEPLATFORMPIXMAPSURFACEEXTPROC) (EGLDisplay dpy, EGLConfig config, void *native_pixmap, const EGLint *attrib_list);
 #endif
 
-#ifndef EGL_EXT_platform_x11
-#define EGL_EXT_platform_x11 1
-#define EGL_PLATFORM_X11_EXT              0x31D5
-#define EGL_PLATFORM_X11_SCREEN_EXT       0x31D6
-#endif /* EGL_EXT_platform_x11 */
-
-#ifndef GL_OES_EGL_image
-#define GL_OES_EGL_image 1
-typedef void *GLeglImageOES;
-typedef void (GL_APIENTRYP PFNGLEGLIMAGETARGETTEXTURE2DOESPROC) (GLenum target, GLeglImageOES image);
-typedef void (GL_APIENTRYP PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC) (GLenum target, GLeglImageOES image);
-#endif
+#ifndef EGL_PLATFORM_X11_EXT
+#    define EGL_PLATFORM_X11_EXT 0x31D5
+#endif /* !EGL_PLATFORM_X11_EXT */
 
 #define DEFAULT_WIDTH  1024
 #define DEFAULT_HEIGHT  768
@@ -90,31 +75,35 @@ struct CogX11Display {
     } xcb;
 
     struct {
-        int32_t device_id;
+        int32_t             device_id;
         struct xkb_context *context;
-        struct xkb_keymap *keymap;
-        struct xkb_state *state;
-
-        uint8_t modifiers;
+        struct xkb_keymap  *keymap;
+        struct xkb_state   *state;
+        xkb_mod_mask_t      shift;
+        xkb_mod_mask_t      control;
+        xkb_mod_mask_t      alt;
+        xkb_mod_mask_t      num_lock;
+        xkb_mod_mask_t      caps_lock;
     } xkb;
 
     struct {
         PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display;
-        PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC create_platform_window_surface;
-        PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_texture;
 
         EGLDisplay display;
         EGLConfig config;
         EGLContext context;
     } egl;
+
+    CogGLRenderer gl_render;
 };
 
 struct CogX11Window {
     struct {
         xcb_window_t window;
 
-        bool needs_initial_paint;
+        bool needs_repaint;
         bool needs_frame_completion;
+
         unsigned width;
         unsigned height;
     } xcb;
@@ -122,18 +111,6 @@ struct CogX11Window {
     struct {
         EGLSurface surface;
     } egl;
-
-    struct {
-        GLint vertex_shader;
-        GLint fragment_shader;
-        GLint program;
-
-        GLuint texture;
-
-        GLint attr_pos;
-        GLint attr_texture;
-        GLint uniform_texture;
-    } gl;
 
     struct {
         struct wpe_view_backend_exportable_fdo *exportable;
@@ -146,10 +123,13 @@ struct CogX11Window {
 static struct CogX11Display *s_display = NULL;
 static struct CogX11Window *s_window = NULL;
 
-
 static void
-xcb_schedule_repaint (void)
+xcb_schedule_notice(void)
 {
+    /* There is a notice message already scheduled, do not queue another. */
+    if (s_window->xcb.needs_repaint || s_window->xcb.needs_frame_completion)
+        return;
+
     xcb_client_message_event_t client_message = {
         .response_type = XCB_CLIENT_MESSAGE,
         .format = 32,
@@ -162,116 +142,111 @@ xcb_schedule_repaint (void)
     xcb_flush (s_display->xcb.connection);
 }
 
-static void
-xcb_initial_paint (void)
+static inline void
+xcb_schedule_repaint(void)
 {
-    eglMakeCurrent (s_display->egl.display, s_window->egl.surface, s_window->egl.surface, s_display->egl.context);
-
-    glViewport (0, 0, s_window->xcb.width, s_window->xcb.height);
-    glClearColor (1, 1, 1, 1);
-    glClear (GL_COLOR_BUFFER_BIT);
-
-    eglSwapBuffers (s_display->egl.display, s_window->egl.surface);
+    xcb_schedule_notice();
+    s_window->xcb.needs_repaint = true;
 }
 
 static void
 xcb_paint_image (struct wpe_fdo_egl_exported_image *image)
 {
-    static const float position_coords[4][2] = {
-        { -1,  1 }, { 1,  1 },
-        { -1, -1 }, { 1, -1 },
-    };
-    static const float texture_coords[4][2] = {
-        { 0, 0 }, { 1, 0 },
-        { 0, 1 }, { 1, 1 },
-    };
-
     eglMakeCurrent (s_display->egl.display, s_window->egl.surface, s_window->egl.surface, s_display->egl.context);
 
     glViewport (0, 0, s_window->xcb.width, s_window->xcb.height);
     glClearColor (1, 1, 1, 1);
     glClear (GL_COLOR_BUFFER_BIT);
+    s_window->xcb.needs_repaint = false;
 
-    glUseProgram (s_window->gl.program);
+    if (image != EGL_NO_IMAGE) {
+        if (s_window->wpe.image != image) {
+            if (s_window->wpe.image)
+                wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(s_window->wpe.exportable,
+                                                                                    s_window->wpe.image);
 
-    glActiveTexture (GL_TEXTURE0);
-    glBindTexture (GL_TEXTURE_2D, s_window->gl.texture);
-    s_display->egl.image_target_texture (GL_TEXTURE_2D,
-                                         wpe_fdo_egl_exported_image_get_egl_image (image));
-    glUniform1i (s_window->gl.uniform_texture, 0);
+            s_window->wpe.image = image;
+            xcb_schedule_notice();
+            s_window->xcb.needs_frame_completion = true;
+        }
 
-    glVertexAttribPointer (s_window->gl.attr_pos, 2, GL_FLOAT, GL_FALSE, 0, position_coords);
-    glVertexAttribPointer (s_window->gl.attr_texture, 2, GL_FLOAT, GL_FALSE, 0, texture_coords);
-
-    glEnableVertexAttribArray (s_window->gl.attr_pos);
-    glEnableVertexAttribArray (s_window->gl.attr_texture);
-
-    glDrawArrays (GL_TRIANGLE_STRIP, 0, 4);
-
-    glDisableVertexAttribArray (s_window->gl.attr_pos);
-    glDisableVertexAttribArray (s_window->gl.attr_texture);
-
-    eglSwapBuffers (s_display->egl.display, s_window->egl.surface);
-
-    s_window->wpe.image = image;
-    s_window->xcb.needs_initial_paint = false;
-    s_window->xcb.needs_frame_completion = true;
-    xcb_schedule_repaint ();
-}
-
-static void
-xcb_frame_completion (void)
-{
-    if (s_window->wpe.image) {
-        wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image (s_window->wpe.exportable, s_window->wpe.image);
-        s_window->wpe.image = NULL;
+        cog_gl_renderer_paint(&s_display->gl_render, wpe_fdo_egl_exported_image_get_egl_image(s_window->wpe.image),
+                              COG_GL_RENDERER_ROTATION_0);
     }
 
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete (s_window->wpe.exportable);
+    eglSwapBuffers(s_display->egl.display, s_window->egl.surface);
+}
+
+static uint32_t
+xcb_update_xkb_modifiers(uint32_t event_state)
+{
+    xkb_mod_mask_t depressed_mods = 0;
+    xkb_mod_mask_t locked_mods = 0;
+    uint32_t       wpe_modifiers = 0;
+    if (event_state & XCB_MOD_MASK_SHIFT) {
+        depressed_mods |= s_display->xkb.shift;
+        wpe_modifiers |= wpe_input_keyboard_modifier_shift;
+    }
+    if (event_state & XCB_MOD_MASK_CONTROL) {
+        depressed_mods |= s_display->xkb.control;
+        wpe_modifiers |= wpe_input_keyboard_modifier_control;
+    }
+    if (event_state & XCB_MOD_MASK_1) {
+        depressed_mods |= s_display->xkb.alt;
+        wpe_modifiers |= wpe_input_keyboard_modifier_alt;
+    }
+
+    if (event_state & XCB_MOD_MASK_LOCK)
+        locked_mods |= s_display->xkb.caps_lock;
+    if (event_state & XCB_MOD_MASK_2)
+        locked_mods |= s_display->xkb.num_lock;
+    xkb_state_update_mask(s_display->xkb.state, depressed_mods, 0, locked_mods, 0, 0, 0);
+    return wpe_modifiers;
 }
 
 static void
-xcb_handle_key_press (xcb_key_press_event_t *event)
+xcb_handle_key_press(xcb_key_press_event_t *event)
 {
-    uint32_t keysym = xkb_state_key_get_one_sym (s_display->xkb.state, event->detail);
-    uint32_t unicode = xkb_state_key_get_utf32 (s_display->xkb.state, event->detail);
+    uint32_t modifiers = xcb_update_xkb_modifiers(event->state);
+    uint32_t keysym = xkb_state_key_get_one_sym(s_display->xkb.state, event->detail);
 
     struct wpe_input_keyboard_event input_event = {
         .time = event->time,
         .key_code = keysym,
-        .hardware_key_code = unicode,
+        .hardware_key_code = event->detail,
         .pressed = true,
-        .modifiers = s_display->xkb.modifiers,
+        .modifiers = modifiers,
     };
-    wpe_view_backend_dispatch_keyboard_event (s_window->wpe.backend, &input_event);
+    wpe_view_backend_dispatch_keyboard_event(s_window->wpe.backend, &input_event);
 }
 
 static void
-xcb_handle_key_release (xcb_key_press_event_t *event)
+xcb_handle_key_release(xcb_key_press_event_t *event)
 {
-    uint32_t keysym = xkb_state_key_get_one_sym (s_display->xkb.state, event->detail);
-    uint32_t unicode = xkb_state_key_get_utf32 (s_display->xkb.state, event->detail);
+    uint32_t modifiers = xcb_update_xkb_modifiers(event->state);
+    uint32_t keysym = xkb_state_key_get_one_sym(s_display->xkb.state, event->detail);
 
     struct wpe_input_keyboard_event input_event = {
         .time = event->time,
         .key_code = keysym,
-        .hardware_key_code = unicode,
+        .hardware_key_code = event->detail,
         .pressed = false,
-        .modifiers = s_display->xkb.modifiers,
+        .modifiers = modifiers,
     };
-    wpe_view_backend_dispatch_keyboard_event (s_window->wpe.backend, &input_event);
+    wpe_view_backend_dispatch_keyboard_event(s_window->wpe.backend, &input_event);
 }
 
 static void
-xcb_handle_axis (xcb_button_press_event_t *event, const int16_t axis_delta[2])
+xcb_handle_axis(xcb_button_press_event_t *event, const int16_t axis_delta[2])
 {
     struct wpe_input_axis_2d_event input_event = {
-        .base = {
-            .type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth,
-            .time = event->time,
-            .x = s_display->xcb.pointer.x,
-            .y = s_display->xcb.pointer.y,
-        },
+        .base =
+            {
+                .type = wpe_input_axis_event_type_mask_2d | wpe_input_axis_event_type_motion_smooth,
+                .time = event->time,
+                .x = s_display->xcb.pointer.x,
+                .y = s_display->xcb.pointer.y,
+            },
         .x_axis = axis_delta[0],
         .y_axis = axis_delta[1],
     };
@@ -363,14 +338,44 @@ xcb_handle_motion_event (xcb_motion_notify_event_t *event)
 }
 
 static void
+view_backend_modify_activity_state(xcb_window_t window_id, enum wpe_view_activity_state state_flag, bool enable)
+{
+    struct CogX11Window *window = s_window;
+
+    if (window->xcb.window != window_id)
+        return;
+
+    if (enable)
+        wpe_view_backend_add_activity_state(window->wpe.backend, state_flag);
+    else
+        wpe_view_backend_remove_activity_state(window->wpe.backend, state_flag);
+}
+
+static inline void
+xcb_handle_visibility_event(const xcb_visibility_notify_event_t *event)
+{
+    switch ((xcb_visibility_t) event->state) {
+    case XCB_VISIBILITY_UNOBSCURED:
+    case XCB_VISIBILITY_PARTIALLY_OBSCURED:
+        view_backend_modify_activity_state(event->window, wpe_view_activity_state_visible, true);
+        break;
+    case XCB_VISIBILITY_FULLY_OBSCURED:
+        view_backend_modify_activity_state(event->window, wpe_view_activity_state_visible, false);
+        break;
+    }
+}
+
+static void
 on_export_fdo_egl_image(void *data, struct wpe_fdo_egl_exported_image *image)
 {
-    xcb_paint_image (image);
+    xcb_paint_image(image);
 }
 
 static void
 xcb_process_events (void)
 {
+    bool repaint_needed = false;
+
     xcb_generic_event_t *event = NULL;
 
     while ((event = xcb_poll_for_event (s_display->xcb.connection))) {
@@ -388,7 +393,7 @@ xcb_process_events (void)
             wpe_view_backend_dispatch_set_size (s_window->wpe.backend,
                                                 s_window->xcb.width,
                                                 s_window->xcb.height);
-            xcb_schedule_repaint ();
+            repaint_needed = true;
             break;
         }
         case XCB_CLIENT_MESSAGE:
@@ -404,16 +409,13 @@ xcb_process_events (void)
             }
 
             if (client_message->type == XCB_ATOM_NOTICE) {
-                if (s_window->xcb.needs_initial_paint) {
-                    xcb_initial_paint ();
-                    s_window->xcb.needs_initial_paint = false;
+                if (s_window->xcb.needs_frame_completion) {
+                    s_window->xcb.needs_frame_completion = false;
+                    wpe_view_backend_exportable_fdo_dispatch_frame_complete(s_window->wpe.exportable);
                 }
 
-                if (s_window->xcb.needs_frame_completion) {
-                    xcb_frame_completion ();
-                    s_window->xcb.needs_frame_completion = false;
-                }
-                break;
+                if (s_window->xcb.needs_repaint)
+                    xcb_paint_image(s_window->wpe.image);
             }
             break;
         }
@@ -432,10 +434,43 @@ xcb_process_events (void)
         case XCB_MOTION_NOTIFY:
             xcb_handle_motion_event ((xcb_motion_notify_event_t *) event);
             break;
+
+        case XCB_FOCUS_IN:
+            view_backend_modify_activity_state(((xcb_focus_in_event_t *) event)->event,
+                                               wpe_view_activity_state_focused,
+                                               true);
+            break;
+        case XCB_FOCUS_OUT:
+            view_backend_modify_activity_state(((xcb_focus_in_event_t *) event)->event,
+                                               wpe_view_activity_state_focused,
+                                               false);
+            break;
+        case XCB_MAP_NOTIFY:
+            view_backend_modify_activity_state(((xcb_focus_in_event_t *) event)->event,
+                                               wpe_view_activity_state_in_window,
+                                               true);
+            break;
+        case XCB_UNMAP_NOTIFY:
+            view_backend_modify_activity_state(((xcb_focus_in_event_t *) event)->event,
+                                               wpe_view_activity_state_in_window,
+                                               false);
+            break;
+        case XCB_VISIBILITY_NOTIFY:
+            xcb_handle_visibility_event((xcb_visibility_notify_event_t *) event);
+            break;
+        case XCB_EXPOSE: {
+            const xcb_expose_event_t *ev = (const xcb_expose_event_t *) event;
+            repaint_needed = (ev->window == s_window->xcb.window && !ev->count);
+            break;
+        }
+
         default:
             break;
         }
     }
+
+    if (repaint_needed)
+        xcb_schedule_repaint();
 };
 
 struct xcb_source {
@@ -499,14 +534,9 @@ init_xcb ()
     s_display->xcb.screen = xcb_setup_roots_iterator (setup).data;
 
     static const uint32_t window_values[] = {
-        XCB_EVENT_MASK_EXPOSURE |
-        XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-        XCB_EVENT_MASK_KEY_PRESS |
-        XCB_EVENT_MASK_KEY_RELEASE |
-        XCB_EVENT_MASK_BUTTON_PRESS |
-        XCB_EVENT_MASK_BUTTON_RELEASE |
-        XCB_EVENT_MASK_POINTER_MOTION
-    };
+        XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_KEY_PRESS |
+        XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
+        XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_VISIBILITY_CHANGE};
 
     xcb_create_window (s_display->xcb.connection,
                        XCB_COPY_FROM_PARENT,
@@ -541,8 +571,7 @@ init_xcb ()
     xcb_map_window (s_display->xcb.connection, s_window->xcb.window);
     xcb_flush (s_display->xcb.connection);
 
-    s_window->xcb.needs_initial_paint = true;
-    xcb_schedule_repaint ();
+    xcb_schedule_repaint();
 
     return TRUE;
 }
@@ -569,7 +598,14 @@ init_xkb (void)
     if (!s_display->xkb.keymap)
         return FALSE;
 
-    s_display->xkb.state = xkb_x11_state_new_from_device (s_display->xkb.keymap, s_display->xcb.connection, s_display->xkb.device_id);
+    s_display->xkb.shift = 1 << xkb_keymap_mod_get_index(s_display->xkb.keymap, "Shift");
+    s_display->xkb.control = 1 << xkb_keymap_mod_get_index(s_display->xkb.keymap, "Control");
+    s_display->xkb.alt = 1 << xkb_keymap_mod_get_index(s_display->xkb.keymap, "Mod1");
+    s_display->xkb.caps_lock = 1 << xkb_keymap_mod_get_index(s_display->xkb.keymap, "Lock");
+    s_display->xkb.num_lock = 1 << xkb_keymap_mod_get_index(s_display->xkb.keymap, "NumLock");
+
+    s_display->xkb.state =
+        xkb_x11_state_new_from_device(s_display->xkb.keymap, s_display->xcb.connection, s_display->xkb.device_id);
     if (!s_display->xkb.state)
         return FALSE;
 
@@ -590,10 +626,20 @@ clear_xkb (void)
 static gboolean
 init_egl (void)
 {
-    s_display->egl.get_platform_display = load_egl_proc_address ("eglGetPlatformDisplayEXT");
-    if (s_display->egl.get_platform_display) {
-        s_display->egl.display = s_display->egl.get_platform_display (EGL_PLATFORM_X11_KHR, s_display->display, NULL);
+    if (!(s_display->egl.get_platform_display = load_egl_proc_address("eglGetPlatformDisplayEXT"))) {
+        g_warning("EGL_EXT_platform_x11 extension unavailable?");
+        return FALSE;
     }
+
+    s_display->egl.display = s_display->egl.get_platform_display(EGL_PLATFORM_X11_EXT, s_display->display, NULL);
+    if (s_display->egl.display == EGL_NO_DISPLAY) {
+        g_warning("Cannot open EGL display (error %#04x)", eglGetError());
+        return FALSE;
+    }
+
+    if (!epoxy_has_egl_extension(s_display->egl.display, "EGL_EXT_platform_x11"))
+        g_warning("eglGetPlatformDisplayEXT() returned a display, but "
+                  "EGL_EXT_platform_x11 is mising. Continuing anyway, but things may break unexpectedly.");
 
     if (!eglInitialize (s_display->egl.display, NULL, NULL))
         return FALSE;
@@ -643,15 +689,10 @@ init_egl (void)
         return FALSE;
 
     Window win = (Window) s_window->xcb.window;
-    s_display->egl.create_platform_window_surface = load_egl_proc_address ("eglCreatePlatformWindowSurfaceEXT");
-    if (s_display->egl.create_platform_window_surface)
-        s_window->egl.surface = s_display->egl.create_platform_window_surface (s_display->egl.display,
-                                                                               s_display->egl.config,
-                                                                               &win, NULL);
+    s_window->egl.surface =
+        eglCreatePlatformWindowSurfaceEXT(s_display->egl.display, s_display->egl.config, &win, NULL);
     if (s_window->egl.surface == EGL_NO_SURFACE)
         return FALSE;
-
-    s_display->egl.image_target_texture = load_egl_proc_address ("glEGLImageTargetTexture2DOES");
 
     eglMakeCurrent (s_display->egl.display, s_window->egl.surface, s_window->egl.surface, s_display->egl.context);
     return TRUE;
@@ -661,107 +702,11 @@ static void
 clear_egl (void)
 {
     if (s_display->egl.display != EGL_NO_DISPLAY) {
-        eglTerminate (s_display->egl.display);
+        if (epoxy_egl_version(s_display->egl.display) >= 12)
+            eglReleaseThread();
+        eglTerminate(s_display->egl.display);
         s_display->egl.display = EGL_NO_DISPLAY;
     }
-
-    eglReleaseThread ();
-}
-
-static gboolean
-init_gl (void)
-{
-    static const char *vertex_shader_source =
-        "attribute vec2 pos;\n"
-        "attribute vec2 texture;\n"
-        "varying vec2 v_texture;\n"
-        "void main() {\n"
-        "  v_texture = texture;\n"
-        "  gl_Position = vec4(pos, 0, 1);\n"
-        "}\n";
-    static const char *fragment_shader_source =
-        "precision mediump float;\n"
-        "uniform sampler2D u_texture;\n"
-        "varying vec2 v_texture;\n"
-        "void main() {\n"
-        "  gl_FragColor = texture2D(u_texture, v_texture);\n"
-        "}\n";
-
-    s_window->gl.vertex_shader = glCreateShader (GL_VERTEX_SHADER);
-    glShaderSource (s_window->gl.vertex_shader, 1, &vertex_shader_source, NULL);
-    glCompileShader (s_window->gl.vertex_shader);
-
-    GLint vertex_shader_compile_status = 0;
-    glGetShaderiv (s_window->gl.vertex_shader, GL_COMPILE_STATUS, &vertex_shader_compile_status);
-    if (!vertex_shader_compile_status) {
-        GLsizei vertex_shader_info_log_length = 0;
-        char vertex_shader_info_log[1024];
-        glGetShaderInfoLog (s_window->gl.vertex_shader, 1023,
-                            &vertex_shader_info_log_length, vertex_shader_info_log);
-        vertex_shader_info_log[vertex_shader_info_log_length] = 0;
-        g_warning ("Unable to compile vertex shader:\n%s", vertex_shader_info_log);
-    }
-
-    s_window->gl.fragment_shader = glCreateShader (GL_FRAGMENT_SHADER);
-    glShaderSource (s_window->gl.fragment_shader, 1, &fragment_shader_source, NULL);
-    glCompileShader (s_window->gl.fragment_shader);
-
-    GLint fragment_shader_compile_status = 0;
-    glGetShaderiv (s_window->gl.fragment_shader, GL_COMPILE_STATUS, &fragment_shader_compile_status);
-    if (!fragment_shader_compile_status) {
-        GLsizei fragment_shader_info_log_length = 0;
-        char fragment_shader_info_log[1024];
-        glGetShaderInfoLog (s_window->gl.fragment_shader, 1023,
-                            &fragment_shader_info_log_length, fragment_shader_info_log);
-        fragment_shader_info_log[fragment_shader_info_log_length] = 0;
-        g_warning ("Unable to compile fragment shader:\n%s", fragment_shader_info_log);
-    }
-
-    s_window->gl.program = glCreateProgram ();
-    glAttachShader (s_window->gl.program, s_window->gl.vertex_shader);
-    glAttachShader (s_window->gl.program, s_window->gl.fragment_shader);
-    glLinkProgram (s_window->gl.program);
-
-    GLint link_status = 0;
-    glGetProgramiv (s_window->gl.program, GL_LINK_STATUS, &link_status);
-    if (!link_status) {
-        GLsizei program_info_log_length = 0;
-        char program_info_log[1024];
-        glGetProgramInfoLog (s_window->gl.program, 1023,
-                             &program_info_log_length, program_info_log);
-        program_info_log[program_info_log_length] = 0;
-        g_warning ("Unable to link program:\n%s", program_info_log);
-        return FALSE;
-    }
-
-    s_window->gl.attr_pos = glGetAttribLocation (s_window->gl.program, "pos");
-    s_window->gl.attr_texture = glGetAttribLocation (s_window->gl.program, "texture");
-    s_window->gl.uniform_texture = glGetUniformLocation (s_window->gl.program, "u_texture");
-
-    glGenTextures (1, &s_window->gl.texture);
-    glBindTexture (GL_TEXTURE_2D, s_window->gl.texture);
-    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA, s_window->xcb.width, s_window->xcb.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glBindTexture (GL_TEXTURE_2D, 0);
-
-    return TRUE;
-}
-
-static void
-clear_gl ()
-{
-    if (s_window->gl.texture)
-        glDeleteTextures (1, &s_window->gl.texture);
-
-    if (s_window->gl.vertex_shader)
-        glDeleteShader (s_window->gl.vertex_shader);
-    if (s_window->gl.fragment_shader)
-        glDeleteShader (s_window->gl.fragment_shader);
-    if (s_window->gl.program)
-        glDeleteProgram (s_window->gl.program);
 }
 
 static gboolean
@@ -840,13 +785,12 @@ cog_x11_platform_setup(CogPlatform *platform, CogShell *shell G_GNUC_UNUSED, con
         return FALSE;
     }
 
-    if (!init_gl ()) {
-        g_set_error_literal (error,
-                             COG_PLATFORM_WPE_ERROR,
-                             COG_PLATFORM_WPE_ERROR_INIT,
-                             "Failed to initialize GL");
+    /*
+     * The call to init_egl() right above leaves the EGLContext active,
+     * which means the renderer can be initialized right away.
+     */
+    if (!cog_gl_renderer_initialize(&s_display->gl_render, error))
         return FALSE;
-    }
 
     if (!init_glib ()) {
         g_set_error_literal (error,
@@ -866,7 +810,7 @@ static void
 cog_x11_platform_finalize(GObject *object)
 {
     clear_glib ();
-    clear_gl ();
+    cog_gl_renderer_finalize(&s_display->gl_render);
     clear_egl ();
     clear_xkb ();
     clear_xcb ();
