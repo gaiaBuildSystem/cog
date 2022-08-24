@@ -5,6 +5,7 @@ cog (0.14.0-1) UNRELEASED; urgency=medium
     - Update overrides.
   * debian/control:
     - Set the debhelper compatibility level to 13.
+    - Update Standards-Version to 4.6.1.0.
 
  -- Alberto Garcia <berto@igalia.com>  Wed, 24 Aug 2022 15:34:44 +0200
 
