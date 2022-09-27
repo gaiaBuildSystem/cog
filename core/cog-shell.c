@@ -281,8 +281,6 @@ cog_shell_constructed(GObject *object)
     g_autofree char *cache_dir =
         g_build_filename (g_get_user_cache_dir (), priv->name, NULL);
 
-    g_autoptr(WebKitWebsiteDataManager) manager = NULL;
-
     if (!priv->web_data_manager) {
         if (priv->automated)
             priv->web_data_manager = webkit_website_data_manager_new_ephemeral();
@@ -453,7 +451,7 @@ cog_shell_class_init (CogShellClass *klass)
     s_properties[PROP_WEB_MEMORY_SETTINGS] =
         g_param_spec_boxed("web-memory-settings",
                            "Web process memory pressure settings",
-                           "Memory pressure handling setttings for web processes",
+                           "Memory pressure handling settings for web processes",
                            WEBKIT_TYPE_MEMORY_PRESSURE_SETTINGS,
                            G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
@@ -475,10 +473,10 @@ cog_shell_class_init (CogShellClass *klass)
      * CogShell:web-data-manager:
      *
      * Optional `WebKitWebsiteDataManager` to be used by the shell. If
-     * specified at construction, then the [property@Cog.Shell.automated]
+     * specified at construction, then the [property@Cog.Shell:automated]
      * property will be ignored and the provided object should have
-     * [property@WebKit.WebsiteDataManager.is-ephemeral] enabled for running
-     * in automation mode..
+     * [property@WebKit.WebsiteDataManager:is-ephemeral] enabled for running
+     * in automation mode.
      */
     s_properties[PROP_WEB_DATA_MANAGER] =
         g_param_spec_object("web-data-manager",
