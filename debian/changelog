@@ -5,6 +5,7 @@ cog (0.16.0-1) UNRELEASED; urgency=medium
     - Remove obsolete files.
   * debian/control:
     - Replace build dependency on cmake with meson.
+    - Add build dependency on libmanette-0.2-dev.
   * debian/rules:
     - Stop building with -DUSE_SOUP2=OFF, this is no longer necessary.
 
