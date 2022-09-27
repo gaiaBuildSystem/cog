@@ -3,7 +3,6 @@ Section: web
 Priority: optional
 Maintainer: Alberto Garcia <berto@igalia.com>
 Build-Depends: debhelper-compat (= 13),
-               cmake,
                libcairo-dev,
                libdrm-dev,
                libgbm-dev,
@@ -11,6 +10,7 @@ Build-Depends: debhelper-compat (= 13),
                libwayland-dev,
                libwpebackend-fdo-1.0-dev (>= 1.10.0),
                libwpewebkit-1.1-dev,
+               meson,
                wayland-protocols
 Standards-Version: 4.6.1.0
 Rules-Requires-Root: no

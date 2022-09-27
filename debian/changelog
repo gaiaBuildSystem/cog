@@ -3,6 +3,10 @@ cog (0.16.0-1) UNRELEASED; urgency=medium
   * New upstream release.
   * debian/copyright:
     - Remove obsolete files.
+  * debian/control:
+    - Replace build dependency on cmake with meson.
+  * debian/rules:
+    - Stop building with -DUSE_SOUP2=OFF, this is no longer necessary.
 
  -- Alberto Garcia <berto@igalia.com>  Tue, 27 Sep 2022 15:04:18 +0200
 
