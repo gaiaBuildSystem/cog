@@ -1325,6 +1325,14 @@ cog_drm_platform_is_supported(void)
     return GPOINTER_TO_INT(once.retval);
 }
 
+static struct wpe_view_backend *
+gamepad_provider_get_view_backend_for_gamepad(void *provider G_GNUC_UNUSED, void *gamepad G_GNUC_UNUSED)
+{
+    /* get_view_backend() might not been called yet */
+    g_assert(wpe_view_data.backend);
+    return wpe_view_data.backend;
+}
+
 static gboolean
 cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *params, GError **error)
 {
@@ -1420,6 +1428,8 @@ cog_drm_platform_setup(CogPlatform *platform, CogShell *shell, const char *param
     g_debug("%s: Renderer '%s' initialized.", __func__, self->renderer->name);
 
     wpe_fdo_initialize_for_egl_display (egl_data.display);
+
+    cog_gamepad_setup(gamepad_provider_get_view_backend_for_gamepad);
 
     return TRUE;
 }

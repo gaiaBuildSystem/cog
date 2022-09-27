@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define HAVE_WEBKIT_NETWORK_PROXY_API WEBKIT_CHECK_VERSION(2, 32, 0)
+
 enum webprocess_fail_action {
     WEBPROCESS_FAIL_UNKNOWN = 0,
     WEBPROCESS_FAIL_ERROR_PAGE,
@@ -53,6 +55,10 @@ static struct {
     gboolean ignore_tls_errors;
     gboolean enable_sandbox;
     gboolean automation;
+#if HAVE_WEBKIT_NETWORK_PROXY_API
+    char    *proxy;
+    gchar  **ignore_hosts;
+#endif /* HAVE_WEBKIT_NETWORK_PROXY_API */
 } s_options = {
     .scale_factor = 1.0,
     .device_scale_factor = 1.0,
@@ -981,6 +987,16 @@ cog_launcher_add_web_settings_option_entries(CogLauncher *launcher)
     g_application_add_option_group(G_APPLICATION(launcher), g_steal_pointer(&option_group));
 }
 
+static gboolean
+option_entry_parse_gamepad(const char *option_name, const char *value, void *data, GError **error)
+{
+    if (!cog_gamepad_parse_backend(value, error))
+        return FALSE;
+
+    cog_gamepad_set_backend(value);
+    return TRUE;
+}
+
 static GOptionEntry s_cli_options[] = {
     {"version", '\0', 0, G_OPTION_ARG_NONE, &s_options.version, "Print version and exit", NULL},
     {"print-appid", '\0', 0, G_OPTION_ARG_NONE, &s_options.print_appid, "Print application ID and exit", NULL},
@@ -1013,6 +1029,11 @@ static GOptionEntry s_cli_options[] = {
      "Enable WebProcess sandbox (default: disabled).", NULL},
     {"automation", '\0', 0, G_OPTION_ARG_NONE, &s_options.automation, "Enable automation mode (default: disabled).",
      NULL},
+#if HAVE_WEBKIT_NETWORK_PROXY_API
+    {"proxy", 0, 0, G_OPTION_ARG_STRING, &s_options.proxy, "Set proxy", "PROXY"},
+    {"ignore-host", 0, 0, G_OPTION_ARG_STRING_ARRAY, &s_options.ignore_hosts, "Set proxy ignore hosts", "HOSTS"},
+#endif /* HAVE_WEBKIT_NETWORK_PROXY_API */
+    {"gamepad", '\0', 0, G_OPTION_ARG_CALLBACK, option_entry_parse_gamepad, "Set gamepad implementation", NULL},
     {G_OPTION_REMAINING, '\0', 0, G_OPTION_ARG_FILENAME_ARRAY, &s_options.arguments, "", "[URL]"},
     {NULL}};
 
@@ -1241,6 +1262,16 @@ cog_launcher_handle_local_options(GApplication *application, GVariantDict *optio
                                                         loop);
         g_main_loop_run(loop);
     }
+
+#if HAVE_WEBKIT_NETWORK_PROXY_API
+    if (s_options.proxy) {
+        WebKitWebsiteDataManager             *data_manager = cog_launcher_get_web_data_manager(launcher);
+        g_autoptr(WebKitNetworkProxySettings) webkit_proxy_settings =
+            webkit_network_proxy_settings_new(s_options.proxy, (const gchar *const *) s_options.ignore_hosts);
+        webkit_website_data_manager_set_network_proxy_settings(data_manager, WEBKIT_NETWORK_PROXY_MODE_CUSTOM,
+                                                               webkit_proxy_settings);
+    }
+#endif /* HAVE_WEBKIT_NETWORK_PROXY_API */
 
     return -1; /* Continue startup. */
 }

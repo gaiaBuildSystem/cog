@@ -1,8 +1,20 @@
-========================
-0.14.0 - August 24, 2022
-========================
+===========================
+0.16.0 - September 27, 2022
+===========================
 
-- drm: Fix compiler warnings.
+- core: Fix generated cogcore.pc file to include required libraries.
+- core: Fix the build when libmanette is not being used.
+- launcher: New --gamepad command line option to choose the gamepad
+  implementation to use.
+
+==========================
+0.15.1 - September 2, 2022
+==========================
+
+- launcher: Add new "--proxy" and "--ignore-host" command line options, which
+  allow setting up a network proxy and a list of hosts that would bypass it.
+- drm, gtk4, wl, x11: Add support for gamepads using libmanette.
+- build: Switch the build system from CMake to Meson.
 
 =======================
 0.13.90 - June 29, 2022
