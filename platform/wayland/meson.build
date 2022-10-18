@@ -48,6 +48,7 @@ wayland_protocols_path = wayland_protocols_dep.get_variable(pkgconfig: 'pkgdatad
 
 if wayland_platform_weston_protocols.length() > 0
     foreach weston_dep_name : [
+            'libweston-12-protocols',
             'libweston-11-protocols',
             'libweston-10-protocols',
             'libweston-9-protocols',
@@ -67,7 +68,7 @@ if wayland_platform_weston_protocols.length() > 0
 
     # The code uses definitions from the drm_fourcc.h header, but does not
     # need to link the library; libdrm here is only a build-time dependency.
-    wayland_platform_dependencies += [dependency('libdrm').partial_dependency(includes: true)]
+    wayland_platform_dependencies += [dependency('libdrm').partial_dependency(compile_args: true)]
 endif
 
 
