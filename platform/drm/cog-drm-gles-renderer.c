@@ -301,6 +301,14 @@ cog_drm_gles_renderer_initialize(CogDrmRenderer *renderer, GError **error)
         return false;
     }
 
+    const char *gl_vendor = (const char *) glGetString(GL_VENDOR);
+    const char *gl_renderer = (const char *) glGetString(GL_RENDERER);
+    const char *gl_version = (const char *) glGetString(GL_VERSION);
+    g_message("DRM/GLES vendor: %s | renderer: %s | version: %s",
+              gl_vendor ? gl_vendor : "(unknown)",
+              gl_renderer ? gl_renderer : "(unknown)",
+              gl_version ? gl_version : "(unknown)");
+
     bool ok = cog_gl_renderer_initialize(&self->gl_render, error);
 
     eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
