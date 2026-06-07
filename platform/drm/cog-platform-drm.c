@@ -681,6 +681,14 @@ init_egl (void)
         return FALSE;
     }
 
+    const char *egl_vendor = eglQueryString(egl_data.display, EGL_VENDOR);
+    const char *egl_version = eglQueryString(egl_data.display, EGL_VERSION);
+    const char *egl_client_apis = eglQueryString(egl_data.display, EGL_CLIENT_APIS);
+    g_message("DRM/EGL vendor: %s | version: %s | client APIs: %s",
+              egl_vendor ? egl_vendor : "(unknown)",
+              egl_version ? egl_version : "(unknown)",
+              egl_client_apis ? egl_client_apis : "(unknown)");
+
     return TRUE;
 }
 
