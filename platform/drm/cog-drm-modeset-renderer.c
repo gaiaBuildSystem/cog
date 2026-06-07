@@ -280,40 +280,47 @@ drm_create_buffer_for_shm_buffer(CogDrmModesetRenderer *self,
     return buffer;
 }
 
-static void
+static bool
 drm_copy_shm_buffer_into_bo(struct wl_shm_buffer *shm_buffer, struct gbm_bo *bo)
 {
     int32_t width = wl_shm_buffer_get_width(shm_buffer);
     int32_t height = wl_shm_buffer_get_height(shm_buffer);
     int32_t stride = wl_shm_buffer_get_stride(shm_buffer);
 
+    if (width <= 0 || height <= 0 || stride <= 0)
+        return false;
+
+    uint32_t bo_width = gbm_bo_get_width(bo);
+    uint32_t bo_height = gbm_bo_get_height(bo);
+
     uint32_t bo_stride = 0;
     void    *map_data = NULL;
-    gbm_bo_map(bo, 0, 0, width, height, GBM_BO_TRANSFER_WRITE, &bo_stride, &map_data);
+    gbm_bo_map(bo, 0, 0, bo_width, bo_height, GBM_BO_TRANSFER_WRITE, &bo_stride, &map_data);
     if (!map_data)
-        return;
+        return false;
 
     wl_shm_buffer_begin_access(shm_buffer);
 
     uint8_t *src = wl_shm_buffer_get_data(shm_buffer);
+    if (!src) {
+        wl_shm_buffer_end_access(shm_buffer);
+        gbm_bo_unmap(bo, map_data);
+        return false;
+    }
+
     uint8_t *dst = map_data;
 
-    uint32_t bo_width = gbm_bo_get_width(bo);
-    uint32_t bo_height = gbm_bo_get_height(bo);
-    if (!(width == bo_width && height == bo_height && stride == bo_stride)) {
-        for (uint32_t y = 0; y < height; ++y) {
-            for (uint32_t x = 0; x < width; ++x) {
-                dst[bo_stride * y + 4 * x + 0] = src[stride * y + 4 * x + 0];
-                dst[bo_stride * y + 4 * x + 1] = src[stride * y + 4 * x + 1];
-                dst[bo_stride * y + 4 * x + 2] = src[stride * y + 4 * x + 2];
-                dst[bo_stride * y + 4 * x + 3] = src[stride * y + 4 * x + 3];
-            }
-        }
-    } else
-        memcpy(dst, src, stride * height);
+    uint32_t copy_width = MIN((uint32_t) width, bo_width);
+    uint32_t copy_height = MIN((uint32_t) height, bo_height);
+    uint32_t copy_stride = MIN((uint32_t) stride, bo_stride);
+    uint32_t copy_bytes = MIN(copy_stride, copy_width * 4);
+    for (uint32_t y = 0; y < copy_height; ++y)
+        memcpy(dst + bo_stride * y, src + stride * y, copy_bytes);
 
     wl_shm_buffer_end_access(shm_buffer);
     gbm_bo_unmap(bo, map_data);
+
+    return true;
 }
 
 typedef struct {
@@ -532,7 +539,10 @@ on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *exported_bu
 
     struct buffer_object *buffer = drm_buffer_for_resource(self, exported_resource);
     if (buffer) {
-        drm_copy_shm_buffer_into_bo(exported_shm_buffer, buffer->bo);
+        if (!drm_copy_shm_buffer_into_bo(exported_shm_buffer, buffer->bo)) {
+            wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(self->exportable, exported_buffer);
+            return;
+        }
 
         buffer->export.shm_buffer = exported_buffer;
         drm_commit_buffer(self, buffer);
@@ -541,7 +551,10 @@ on_export_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *exported_bu
 
     buffer = drm_create_buffer_for_shm_buffer(self, exported_resource, exported_shm_buffer);
     if (buffer) {
-        drm_copy_shm_buffer_into_bo(exported_shm_buffer, buffer->bo);
+        if (!drm_copy_shm_buffer_into_bo(exported_shm_buffer, buffer->bo)) {
+            wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(self->exportable, exported_buffer);
+            return;
+        }
 
         buffer->export.shm_buffer = exported_buffer;
         drm_commit_buffer(self, buffer);
