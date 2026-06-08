@@ -21,7 +21,7 @@ Vcs-Git: https://salsa.debian.org/berto/cog.git
 
 Package: cog
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: libgles2, ${shlibs:Depends}, ${misc:Depends}
 Description: Single-window web browser based on WPE WebKit
  Cog is a small, single-window web browser based on WPE WebKit.
  It provides no user interface and is suitable to be used as a web
