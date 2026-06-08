@@ -1,0 +1,101 @@
+name: Build Debian Package and Publish Release
+
+on:
+  push:
+    branches:
+      - debian-*
+
+jobs:
+  build:
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+      fail-fast: false
+
+    runs-on: ${{ matrix.runner }}
+    container: debian:bookworm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper-compat dpkg-dev \
+            libcairo-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libinput-dev \
+            libmanette-0.2-dev \
+            libwayland-dev \
+            libwpebackend-fdo-1.0-dev \
+            libwpewebkit-1.1-dev \
+            meson \
+            wayland-protocols
+
+      - name: Build Debian package
+        run: |
+          dpkg-buildpackage -us -uc -b
+          mkdir -p artifacts
+          mv ../*.deb ../*.buildinfo ../*.changes artifacts/ 2>/dev/null || true
+
+      - name: Get package version
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=debian-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: artifacts/*
+
+  release:
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get package version
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=debian-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Debian package ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: artifacts/*
+          body: |
+            Debian packages built from branch `${{ github.ref_name }}` at commit `${{ github.sha }}`.
+
+            | Architecture | Package |
+            |---|---|
+            | amd64 (x86_64) | included |
+            | arm64 (aarch64) | included |
