@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <gbm.h>
 #include <glib-unix.h>
+#include <wayland-server.h>
 #include <wayland-util.h>
 #include <wpe/fdo-egl.h>
 #include <wpe/fdo.h>
@@ -65,6 +66,63 @@ typedef struct {
     } connector_props, crtc_props, plane_props;
 } CogDrmGlesRenderer;
 
+/*
+ * Allocating a BO with most drivers typically does NOT query the DRM/KMS
+ * subsystem to know which modifiers are appropriate for an output, which
+ * means the modifiers reported by libgbm might result in a failed frame
+ * buffer allocation. Retrying without modifiers can work in many cases.
+ *
+ * For more on this topic, see https://lkml.org/lkml/2020/7/1/1118
+ */
+static void
+cog_drm_gles_renderer_commit_frame(CogDrmGlesRenderer *self)
+{
+    int           drm_fd = gbm_device_get_fd(self->gbm_device);
+    struct gbm_bo *bo = gbm_surface_lock_front_buffer(self->gbm_surface);
+
+    uint32_t handles[4], strides[4], offsets[4];
+    uint64_t modifiers[4];
+    for (unsigned i = 0; i < gbm_bo_get_plane_count(bo); i++) {
+        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
+        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+        offsets[i] = gbm_bo_get_offset(bo, i);
+        modifiers[i] = gbm_bo_get_modifier(bo);
+    }
+
+    uint32_t fb_id = 0;
+    uint32_t flags = (modifiers[0] && modifiers[0] != DRM_FORMAT_MOD_INVALID) ? DRM_MODE_FB_MODIFIERS : 0;
+    int      ret = drmModeAddFB2WithModifiers(drm_fd, self->mode.hdisplay, self->mode.vdisplay, self->gbm_format,
+                                              handles, strides, offsets, modifiers, &fb_id, flags);
+    if (ret) {
+        handles[0] = gbm_bo_get_handle(bo).u32;
+        handles[1] = handles[2] = handles[3] = 0;
+        strides[0] = gbm_bo_get_stride(bo);
+        strides[1] = strides[2] = strides[3] = 0;
+        offsets[0] = offsets[1] = offsets[2] = offsets[3] = 0;
+        ret = drmModeAddFB2(drm_fd, self->mode.hdisplay, self->mode.vdisplay, self->gbm_format, handles, strides,
+                            offsets, &fb_id, 0);
+    }
+    if (ret) {
+        g_warning("%s: Cannot create framebuffer (%s)", __func__, g_strerror(errno));
+        gbm_surface_release_buffer(self->gbm_surface, bo);
+        return;
+    }
+    gbm_bo_set_user_data(bo, GINT_TO_POINTER(fb_id), NULL);
+
+    if (G_UNLIKELY(!self->mode_set)) {
+        if (drmModeSetCrtc(drm_fd, self->crtc_id, fb_id, 0, 0, &self->connector_id, 1, &self->mode)) {
+            g_warning("%s: Cannot set mode (%s)", __func__, g_strerror(errno));
+            return;
+        }
+        self->mode_set = true;
+    }
+
+    self->next_bo = bo;
+
+    if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self))
+        g_warning("%s: Cannot schedule page flip (%s)", __func__, g_strerror(errno));
+}
+
 static void
 cog_drm_gles_renderer_handle_egl_image(void *data, struct wpe_fdo_egl_exported_image *image)
 {
@@ -87,64 +145,96 @@ cog_drm_gles_renderer_handle_egl_image(void *data, struct wpe_fdo_egl_exported_i
     }
 
     wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(self->exportable, image);
+    cog_drm_gles_renderer_commit_frame(self);
+}
 
-    int drm_fd = gbm_device_get_fd(self->gbm_device);
+#ifndef GL_BGRA_EXT
+#    define GL_BGRA_EXT 0x80E1
+#endif
 
-    struct gbm_bo *bo = gbm_surface_lock_front_buffer(self->gbm_surface);
+static void
+cog_drm_gles_renderer_handle_shm_buffer(void *data, struct wpe_fdo_shm_exported_buffer *exported_buffer)
+{
+    CogDrmGlesRenderer  *self = data;
+    struct wl_shm_buffer *shm_buffer = wpe_fdo_shm_exported_buffer_get_shm_buffer(exported_buffer);
 
-    uint32_t handles[4], strides[4], offsets[4];
-    uint64_t modifiers[4];
-
-    for (unsigned i = 0; i < gbm_bo_get_plane_count(bo); i++) {
-        handles[i] = gbm_bo_get_handle_for_plane(bo, i).u32;
-        strides[i] = gbm_bo_get_stride_for_plane(bo, i);
-        offsets[i] = gbm_bo_get_offset(bo, i);
-        modifiers[i] = gbm_bo_get_modifier(bo);
+    uint32_t format = wl_shm_buffer_get_format(shm_buffer);
+    if (format != WL_SHM_FORMAT_ARGB8888 && format != WL_SHM_FORMAT_XRGB8888) {
+        g_warning("%s: unsupported SHM buffer format %u, dropping frame", __func__, format);
+        wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(self->exportable, exported_buffer);
+        return;
     }
+
+    if (!eglMakeCurrent(self->egl_display, self->egl_surface, self->egl_surface, self->egl_context)) {
+        g_critical("%s: Cannot activate EGL context (%#04x)", __func__, eglGetError());
+        wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(self->exportable, exported_buffer);
+        return;
+    }
+
+    glViewport(0, 0, self->mode.hdisplay, self->mode.vdisplay);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    int32_t width = wl_shm_buffer_get_width(shm_buffer);
+    int32_t height = wl_shm_buffer_get_height(shm_buffer);
+    int32_t stride = wl_shm_buffer_get_stride(shm_buffer);
 
     /*
-     * Allocating a BO with most drivers typically does NOT query the DRM/KMS
-     * subsystem to know which modifiers are appropriate for an output, which
-     * means the modifiers reported by libgbm might result in a failed frame
-     * buffer allocation. Retrying without modifiers can work in many cases.
-     *
-     * For more on this topic, see https://lkml.org/lkml/2020/7/1/1118
+     * WL_SHM_FORMAT_ARGB8888/XRGB8888 memory layout on little-endian: B,G,R,[A|X].
+     * GL_BGRA_EXT (GL_EXT_texture_format_BGRA8888) handles this directly.
+     * Without that extension, channel order is wrong but at least no crash occurs.
      */
-    uint32_t fb_id = 0;
-    uint32_t flags = (modifiers[0] && modifiers[0] != DRM_FORMAT_MOD_INVALID) ? DRM_MODE_FB_MODIFIERS : 0;
-    int ret = drmModeAddFB2WithModifiers(drm_fd, self->mode.hdisplay, self->mode.vdisplay, self->gbm_format, handles,
-                                         strides, offsets, modifiers, &fb_id, flags);
-    if (ret) {
-        handles[0] = gbm_bo_get_handle(bo).u32;
-        handles[1] = handles[2] = handles[3] = 0;
-        strides[0] = gbm_bo_get_stride(bo);
-        strides[1] = strides[2] = strides[3] = 0;
-        offsets[0] = offsets[1] = offsets[2] = offsets[3] = 0;
-        ret = drmModeAddFB2(drm_fd, self->mode.hdisplay, self->mode.vdisplay, self->gbm_format, handles, strides,
-                            offsets, &fb_id, 0);
+    GLenum gl_format = epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888") ? GL_BGRA_EXT : GL_RGBA;
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, self->gl_render.texture);
+
+    wl_shm_buffer_begin_access(shm_buffer);
+    const uint8_t *src = wl_shm_buffer_get_data(shm_buffer);
+
+    if (stride == width * 4) {
+        glTexImage2D(GL_TEXTURE_2D, 0, gl_format, width, height, 0, gl_format, GL_UNSIGNED_BYTE, src);
+    } else {
+        /* Non-tight stride: allocate storage once then upload row by row. */
+        glTexImage2D(GL_TEXTURE_2D, 0, gl_format, width, height, 0, gl_format, GL_UNSIGNED_BYTE, NULL);
+        for (int32_t y = 0; y < height; y++)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, width, 1, gl_format, GL_UNSIGNED_BYTE, src + (ptrdiff_t) y * stride);
     }
-    if (ret) {
-        g_warning("%s: Cannot create framebuffer (%s)", __func__, g_strerror(errno));
-        gbm_surface_release_buffer(self->gbm_surface, bo);
+
+    wl_shm_buffer_end_access(shm_buffer);
+    /* glTexImage2D copies into driver storage, so the SHM buffer can be released now. */
+    wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(self->exportable, exported_buffer);
+
+    /* Draw a fullscreen textured quad using the same shader/VBO set up by cog_gl_renderer_initialize. */
+    CogGLRenderer *gl = &self->gl_render;
+    glUseProgram(gl->program);
+    glUniform1i(gl->uniform_texture, 0);
+
+    if (gl->vao > 0)
+        glBindVertexArray(gl->vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, gl->buffer_vertex);
+    glVertexAttribPointer(gl->attrib_position, 2, GL_FLOAT, GL_FALSE, 0, (void *) 0);
+    glVertexAttribPointer(gl->attrib_texture, 2, GL_FLOAT, GL_FALSE, 0,
+                          (void *) ((self->rotation + 1) * 2 * 4 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(gl->attrib_position);
+    glEnableVertexAttribArray(gl->attrib_texture);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(gl->attrib_position);
+    glDisableVertexAttribArray(gl->attrib_texture);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    if (gl->vao > 0)
+        glBindVertexArray(0);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (G_UNLIKELY(!eglSwapBuffers(self->egl_display, self->egl_surface))) {
+        g_critical("%s: eglSwapBuffers failed (%#04x)", __func__, eglGetError());
         return;
     }
-    gbm_bo_set_user_data(bo, GINT_TO_POINTER(fb_id), NULL);
 
-    if (G_UNLIKELY(!self->mode_set)) {
-        int ret = drmModeSetCrtc(drm_fd, self->crtc_id, fb_id, 0, 0, &self->connector_id, 1, &self->mode);
-        if (ret) {
-            g_warning("%s: Cannot set mode (%s)", __func__, g_strerror(errno));
-            return;
-        }
-        self->mode_set = true;
-    }
-
-    self->next_bo = bo;
-
-    if (drmModePageFlip(drm_fd, self->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, self)) {
-        g_warning("%s: Cannot schedule page flip (%s)", __func__, g_strerror(errno));
-        return;
-    }
+    cog_drm_gles_renderer_commit_frame(self);
 }
 
 static void
@@ -395,6 +485,7 @@ cog_drm_gles_renderer_create_exportable(CogDrmRenderer *renderer, uint32_t width
 
     static const struct wpe_view_backend_exportable_fdo_egl_client client = {
         .export_fdo_egl_image = cog_drm_gles_renderer_handle_egl_image,
+        .export_shm_buffer = cog_drm_gles_renderer_handle_shm_buffer,
     };
     return (self->exportable = wpe_view_backend_exportable_fdo_egl_create(&client, renderer, width, height));
 }
