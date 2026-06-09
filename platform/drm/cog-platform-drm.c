@@ -803,7 +803,10 @@ input_handle_touch_event (enum libinput_event_type touch_type, struct libinput_e
     }
 
     int id = libinput_event_touch_get_seat_slot (touch_event);
-    if (id < 0 || id >= G_N_ELEMENTS (input_data.touch_points))
+    if (id < 0)
+        id = 0;
+
+    if (id >= G_N_ELEMENTS (input_data.touch_points))
         return;
 
     input_data.last_touch_type = event_type;
@@ -826,12 +829,15 @@ input_handle_touch_event (enum libinput_event_type touch_type, struct libinput_e
 static void
 input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, bool absolute)
 {
-    if (!cursor.enabled)
+    const unsigned int screen_width = cursor.enabled ? cursor.screen_width : drm_data.width;
+    const unsigned int screen_height = cursor.enabled ? cursor.screen_height : drm_data.height;
+
+    if (!screen_width || !screen_height)
         return;
 
     if (absolute) {
-        cursor.x = libinput_event_pointer_get_absolute_x_transformed(pointer_event, cursor.screen_width);
-        cursor.y = libinput_event_pointer_get_absolute_y_transformed(pointer_event, cursor.screen_height);
+        cursor.x = libinput_event_pointer_get_absolute_x_transformed(pointer_event, screen_width);
+        cursor.y = libinput_event_pointer_get_absolute_y_transformed(pointer_event, screen_height);
     } else {
         cursor.x += libinput_event_pointer_get_dx(pointer_event);
         cursor.y += libinput_event_pointer_get_dy(pointer_event);
@@ -839,14 +845,14 @@ input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, 
 
     if (cursor.x < 0) {
         cursor.x = 0;
-    } else if (cursor.x > cursor.screen_width - 1) {
-        cursor.x = cursor.screen_width - 1;
+    } else if (cursor.x > screen_width - 1) {
+        cursor.x = screen_width - 1;
     }
 
     if (cursor.y < 0) {
         cursor.y = 0;
-    } else if (cursor.y > cursor.screen_height - 1) {
-        cursor.y = cursor.screen_height - 1;
+    } else if (cursor.y > screen_height - 1) {
+        cursor.y = screen_height - 1;
     }
 
     struct wpe_input_pointer_event event = {
@@ -860,15 +866,14 @@ input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, 
     };
 
     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
-    kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y);
+
+    if (cursor.enabled)
+        kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y);
 }
 
 static void
 input_handle_pointer_button_event (struct libinput_event_pointer *pointer_event)
 {
-    if (!cursor.enabled)
-        return;
-
     struct wpe_input_pointer_event event = {
         .type = wpe_input_pointer_event_type_button,
         .time = libinput_event_pointer_get_time(pointer_event),
